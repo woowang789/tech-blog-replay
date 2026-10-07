@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: replay
+      MYSQL_USER: replay
+      MYSQL_PASSWORD: replay
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      # 로그 수집기(pv)가 stdout 파이프에서 초당 읽어 가는 바이트 수.
+      # 평소 로그량(초당 약 7KB)은 넉넉히 감당하고, DEBUG를 켜면(초당 약 270KB) 못 따라가는 수준
+      LOG_CONSUMER_RATE: ${LOG_CONSUMER_RATE:-16k}
+    ports:
+      - "8080:8080" # API
+      - "8081:8081" # actuator (메트릭, 로그 레벨, 스레드 덤프)
+    stop_grace_period: 2s

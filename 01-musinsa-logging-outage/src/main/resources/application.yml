@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: logging-outage
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/replay
+    username: replay
+    password: replay
+    hikari:
+      # 원문 조건과 같은 HikariCP 기본값을 명시해 둔다
+      maximum-pool-size: 10
+      connection-timeout: 30000
+  jpa:
+    # 커넥션을 쥐는 구간을 @Transactional 범위로 한정한다
+    open-in-view: false
+    hibernate:
+      ddl-auto: create
+
+server:
+  tomcat:
+    threads:
+      max: 200 # 기본값
+    mbeanregistry:
+      enabled: true # tomcat.threads.busy 메트릭용
+
+management:
+  server:
+    # API(8080)와 포트·스레드 풀이 분리돼 있어 장애 중에도 메트릭과 스레드 덤프를 볼 수 있다
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,loggers,threaddump
+
+replay:
+  # DEBUG를 켰을 때 요청 한 건이 추가로 남기는 로그 줄 수
+  debug-lines-per-request: 30

@@ -1,0 +1,5 @@
+### macOS ###
+.DS_Store
+
+### IntelliJ IDEA (루트에서 연 프로젝트 설정) ###
+.idea/
