@@ -5,7 +5,7 @@
 .idea/
 
 ### 개인 기록 ###
-# 프로젝트별 개인 Q&A
-NOTE.md
+# 프로젝트별 개인 Q&A(NOTE.md)와 블로그 초안
+blog/
 # Claude용 프로젝트 지침
 /.claude/CLAUDE.md

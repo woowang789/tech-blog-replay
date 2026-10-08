@@ -25,6 +25,8 @@ services:
       # 3단계 스위치. 아무것도 안 주면 1·2단계와 같은 상태다
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}   # trace, async, trace-aware (logback-spring.xml 참고)
       OTEL_AGENT: ${OTEL_AGENT:-off}                        # on이면 OpenTelemetry 에이전트를 붙인다
+      # 4-A: true면 Tomcat이 요청마다 가상 스레드를 쓴다 (spring.threads.virtual.enabled)
+      SPRING_THREADS_VIRTUAL_ENABLED: ${VIRTUAL_THREADS:-false}
       # DEBUG를 켰을 때 요청 한 건이 더 남기는 로그 줄 수 (3-D)
       REPLAY_DEBUGLINESPERREQUEST: ${DEBUG_LINES_PER_REQUEST:-30}
       # 에이전트를 붙여도 추적 데이터를 밖으로 보내지는 않는다 (trace_id만 쓴다)

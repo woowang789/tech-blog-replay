@@ -51,6 +51,11 @@ def classify(threads):
     return pipe_write, log_lock, conn_wait
 
 
+def async_queue_put(threads):
+    # 4-B: AsyncAppender 큐가 가득 차서, 로그를 큐에 넣으려고 자리가 나기를 기다리는 중 (neverBlock=false)
+    return [t for t in threads if "AsyncAppenderBase.put" in t]
+
+
 def lock_owner(threads, log_lock):
     # 락을 기다리는 스레드들이 가리키는 락 주소로 락의 주인을 찾는다
     waited = Counter()
@@ -76,6 +81,12 @@ def main(path):
     print(f"  2) 로그 출력 락 대기 (streamWriteLock)           : {len(log_lock):4d}개 "
           f"(커넥션 보유 {holding}개, 타임아웃 뒤 실패 로그 {failing}개, 기타 {len(log_lock) - holding - failing}개)")
     print(f"  3) DB 커넥션 대기 (HikariPool.getConnection)     : {len(conn_wait):4d}개")
+    queue_put = async_queue_put(threads)
+    if queue_put:
+        q_holding = sum(map(is_holding_connection, queue_put))
+        q_failing = sum(is_logging_failure(t) and not is_holding_connection(t) for t in queue_put)
+        print(f"  4) 비동기 출력 큐에 넣으려고 대기 (AsyncAppender) : {len(queue_put):4d}개 "
+              f"(커넥션 보유 {q_holding}개, 타임아웃 뒤 실패 로그 {q_failing}개, 기타 {len(queue_put) - q_holding - q_failing}개)")
 
     addr, count, owner = lock_owner(threads, log_lock)
     if owner:

@@ -29,7 +29,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,metrics,loggers,threaddump
+        include: health,metrics,loggers,threaddump,errorstorm # errorstorm: 4-B 스위치
 
 replay:
   # DEBUG를 켰을 때 요청 한 건이 추가로 남기는 로그 줄 수
