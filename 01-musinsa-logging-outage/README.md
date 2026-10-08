@@ -13,6 +13,7 @@
 
 1. **로그 쓰기는 락 하나로 직렬화된다.** Logback `OutputStreamAppender`(ConsoleAppender의 부모)는 한 번에 한 스레드만 출력 스트림에 쓰게 한다. 한 스레드가 `write`에서 멈추면 나머지는 락을 기다린다.
 2. **버퍼는 두 단계다.** JVM의 `BufferedOutputStream`(8KB) → 커널의 stdout 파이프 버퍼(약 64KB). 기본값 `immediateFlush=true`는 로그마다 시스템 콜을 부른다.
+   - 재현해 보니 콘솔 출력에서는 다르다. Spring Boot 기본 콘솔 출력이 쓰는 `System.out`은 JDK가 128바이트 버퍼에 쓸 때마다 비우는 설정(autoFlush)으로 만든다. 그래서 `immediateFlush`를 꺼도 로그 한 줄마다 쓰기 시스템 콜이 한 번 나갔다(로그 1만 줄에 10,006회, `immediateFlush=false`에서 10,003회). `docker compose exec app javap -c -p java.lang.System`의 `newPrintStream`에서 확인할 수 있다.
 3. **임계점은 파이프 뒤 소비자의 처리량이다.** 디스크 IOPS가 아니라 로그를 읽어 가는 쪽(containerd → 로그 파일 → fluent-bit)이 못 따라가면 파이프가 찬다.
 4. **커넥션을 쥔 채 멈춘다.** 트랜잭션 안에서 찍은 로그가 막히면 커넥션 보유 시간이 늘어나 풀이 고갈되고, 새 요청은 30초 타임아웃에 걸린다.
 
@@ -23,9 +24,8 @@
 | 0. 사전 확인 | 최신 버전(Spring Boot 4.1.1)에서도 같은 조건이 성립하고 재현되는가 | ✅ 완료 |
 | 1. 재현 | 수집기가 멈출 때(1-A), 운영 중 DEBUG를 켤 때(1-B) | ✅ 완료 |
 | 2. 원인 증명 | 커널, JVM, 커넥션 풀, MySQL에서 각각 증거를 잡아 연쇄를 한 고리씩 증명 | ✅ 완료 |
-| 3. 원문 주장 검증 | 64KB, `immediateFlush`, 소비자 처리량 임계점, 30초 주기 burst가 나타나는 조건, trace_id 누락, drop 비율, caller 비용 | |
-| 4. 해결책 비교 | 원문의 `TraceAwareAsyncAppender`, OpenTelemetry의 MDC 연동, 큐 정책(`neverBlock`, `discardingThreshold`) | |
-| 5. 원문 너머 | 가상 스레드라면 달라지나? 지속 부하에서는? | |
+| 3. 해결책 재현 | 원문의 `TraceAwareAsyncAppender`를 같은 장애 조건에서 재현하고, 원문의 검증(trace_id 보존, 로그 버림, 요청 스레드 비용)을 따라 한다 | ✅ 완료 |
+| 4. 원문 너머 | 가상 스레드라면 달라지나? 지속 부하에서는? | |
 
 ## 실험 환경
 
@@ -59,6 +59,7 @@ app 컨테이너
 | Tomcat | 11.0.24 |
 | MySQL | 8.4 |
 | Java | 21 (Eclipse Temurin) |
+| OpenTelemetry Java 에이전트 / API | 2.32.0 / 1.62.0 (3단계부터) |
 
 ## 0단계: 사전 확인 결과
 
@@ -187,7 +188,7 @@ python3 scripts/k6_timeline.py results/k6-1b.csv
 
 > **k6의 `dropped_iterations`에 대해:** 응답이 수십 초씩 걸리면 동시에 붙잡힌 가상 사용자가 수천 명 필요하다. k6가 실행 중에 가상 사용자를 늘리는 속도가 못 따라가면 보내지 못한 요청이 `dropped_iterations`로 집계된다. 실제 서비스였다면 그만큼 요청이 더 쌓였을 것이므로 결론에는 영향이 없다.
 
-## 1단계 결과
+### 1단계 결과
 
 직접 실행(2026-10-07~08)한 값은 **(직접)**, Claude가 검증하며 돌린 값(`results/claude-verification/`)은 **(검증)**으로 구분했다. 직접 실행은 절차보다 짧게 돌아서, 1-A는 30초가 되기 전에 재개했고 1-B는 DEBUG를 약 30초만 켰다.
 
@@ -310,3 +311,219 @@ DURATION=150s k6 run k6/load.js
 **2단계에서 새로 알게 된 것**
 - JVM이 RUNNABLE로 본 스레드는 14개였지만, 커널에서 실제로 실행 중(R)인 스레드는 1개였다. 나머지 245개는 모두 잠든 상태(S)였다.
 - 커넥션 풀이 고갈된 동안 MySQL은 쿼리를 하나도 실행하지 않았다. 커넥션 10개가 트랜잭션을 연 채 50초 동안 아무 일도 하지 않았다.
+
+
+## 3단계: 원문의 해결책 재현
+
+원문의 흐름을 같은 장애 조건(1-B)에서 그대로 따라간다.
+
+1. **동기 출력** (원문의 표준 구성): trace_id는 남지만, 로그가 몰리면 서비스가 멈춘다.
+2. **기본 AsyncAppender** (원문의 딜레마): 서비스는 멈추지 않지만 trace_id가 빈 값이 된다.
+3. **TraceAwareAsyncAppender** (원문의 해결책): 서비스도 멈추지 않고 trace_id도 남는다. 대신 큐가 차면 로그를 버린다.
+
+세 경우 모두 OpenTelemetry 에이전트를 붙이고, 원문의 표준 로깅 라이브러리처럼 로그를 문자열로 만드는 순간 `Span.current()`에서 trace_id를 읽는다. 바꾸는 것은 출력 방식 하나뿐이다.
+
+### 원문의 해결책 코드
+
+| 파일 | 하는 일 |
+|---|---|
+| `logging/TraceAwareAsyncAppender` | 원문 코드와 같다. `AsyncAppender`를 상속해 `append()`만 바꿨다. 큐에 넣기 전, 아직 caller 스레드일 때 `Span.current()`로 trace_id와 span_id를 읽어 이벤트에 담는다 |
+| `logging/TraceStampedEvent` | 원본 로그 이벤트를 감싸서 모든 동작은 그대로 위임하고, 캡처한 trace_id와 span_id만 더 들고 간다 |
+| `logging/OtelTraceIdConverter`, `OtelSpanIdConverter` | 로그를 문자열로 만들 때 trace_id를 채운다. `TraceStampedEvent`면 캡처해 둔 값을, 아니면 그 순간의 `Span.current()`를 쓴다 |
+| `src/main/resources/logback-spring.xml` | 출력 방식을 고르는 스위치. `trace-aware`는 원문처럼 `neverBlock=true`(큐가 가득 차면 기다리지 않고 버림)이고, 나머지는 Logback 기본값이다 |
+
+### 실험 도구
+
+| 파일 | 하는 일 |
+|---|---|
+| `scripts/scenario.sh <이름>` | 지금 떠 있는 설정 그대로 1-B 장애 조건(초당 50건 100초, 시작 15초 뒤 DEBUG를 켜고 60초 뒤 끔)을 자동으로 돌린다. 결과를 `results/compare-<이름>/`에 남기고 요약을 출력한다 |
+| `scripts/compare_report.py` | 결과 디렉터리 여러 개를 한 표로 비교한다 |
+| `scripts/trace-check.sh` | `traceparent` 헤더로 보낸 trace_id가 로그에 그대로 찍히는지 센다. 원문이 말한 "서비스를 넘어 같은 trace_id가 이어진다"를 확인한다 |
+| `GET /experiments/logging-config` | 지금 붙어 있는 appender와 설정값. 스위치가 실제로 적용됐는지 확인할 때 쓴다 |
+| OpenTelemetry Java 에이전트 2.32.0 | 빌드할 때 Maven Central에서 받아 이미지에 넣는다. `OTEL_AGENT=on`일 때만 붙고, 추적 데이터를 밖으로 보내지는 않는다 |
+
+스위치는 docker-compose의 환경 변수다. 변수를 앞에 붙여 `docker compose up -d`로 다시 띄우면 바뀌고, 변수 없이 `docker compose up -d`를 하면 기본값(1·2단계와 같은 상태)으로 돌아온다.
+
+| 변수 | 기본값 | 뜻 |
+|---|---|---|
+| `OTEL_AGENT` | `off` | `on`이면 OpenTelemetry 에이전트를 붙인다 |
+| `SPRING_PROFILES_ACTIVE` | 없음 | `trace`: 로그에 trace_id를 넣는다. 여기에 `async`(기본 AsyncAppender)나 `trace-aware`(원문의 해결책)를 더하면 출력 방식이 바뀐다 |
+| `DEBUG_LINES_PER_REQUEST` | `30` | DEBUG를 켰을 때 요청 한 건이 더 남기는 로그 줄 수 (3-D) |
+
+`scenario.sh` 요약의 열
+
+| 열 | 뜻 |
+|---|---|
+| DEBUG 동안 성공/초 | DEBUG를 켠 60초 동안 끝난 성공 응답 수 ÷ 60. 부하는 초당 50건이다 |
+| 503 | 커넥션 획득 실패 응답 수 |
+| p95, 최대 | 전체 요청의 응답 시간 |
+| 회복 | DEBUG를 끈 뒤, 1초 넘게 걸린 응답이 마지막으로 끝나기까지 걸린 시간 |
+| 로그 이벤트, 출력된 줄, 버림 | 앱이 남기려 한 로그 수(`logback.events` 메트릭), 그중 수집기를 지나 실제로 출력된 줄 수, 버려진 비율 |
+| trace_id 빈 줄 | 출력된 요청 스레드 로그 중 trace_id가 빈 줄 수 / trace_id 칸이 있는 줄 수 |
+
+### 준비
+
+코드와 이미지가 바뀌었으니 다시 빌드한다.
+
+```bash
+./gradlew bootJar
+```
+
+```bash
+docker compose up -d --build
+```
+
+실험이 도는 동안 진행을 보려면 다른 터미널에 커넥션 풀 상태를 띄워 둔다.
+
+```bash
+./scripts/pool.sh
+```
+
+### 실험 3-A: 동기 출력 (원문의 표준 구성)
+
+```bash
+OTEL_AGENT=on SPRING_PROFILES_ACTIVE=trace docker compose up -d
+```
+
+```bash
+./scripts/trace-check.sh
+```
+
+```bash
+./scripts/scenario.sh sync
+```
+
+### 실험 3-B: 기본 AsyncAppender (원문의 딜레마)
+
+```bash
+OTEL_AGENT=on SPRING_PROFILES_ACTIVE=trace,async docker compose up -d
+```
+
+```bash
+curl -s localhost:8080/experiments/logging-config
+```
+
+```bash
+./scripts/trace-check.sh
+```
+
+```bash
+./scripts/scenario.sh async
+```
+
+### 실험 3-C: TraceAwareAsyncAppender (원문의 해결책)
+
+```bash
+OTEL_AGENT=on SPRING_PROFILES_ACTIVE=trace,trace-aware docker compose up -d
+```
+
+```bash
+curl -s localhost:8080/experiments/logging-config
+```
+
+```bash
+./scripts/trace-check.sh
+```
+
+```bash
+./scripts/scenario.sh trace-aware
+```
+
+세 결과를 한 표로 본다.
+
+```bash
+python3 scripts/compare_report.py results/compare-sync results/compare-async results/compare-trace-aware
+```
+
+시간대별 성공·실패는 1단계 때처럼 본다.
+
+```bash
+python3 scripts/k6_timeline.py results/compare-trace-aware/k6.csv
+```
+
+**관찰 포인트 (3-A~3-C)**
+- `trace-check.sh`: 세 경우 각각 보낸 trace_id가 그대로 찍힌 줄은 몇 줄인가? 세 경우 모두 실제로 출력하는 appender는 같은 `CONSOLE`이다.
+- 비교표: 장애 조건에서 성공/초, 503, p95는 어떻게 다른가?
+- 비동기 출력에서는 로그를 얼마나 버렸나? 버린 상태에서도 출력된 요청 로그의 trace_id는 빠짐없이 남았나? (원문: 65%를 버린 조건에서도 출력된 로그의 trace_id 결측 0%)
+
+> **버림 비율에 대해:** 원문은 초당 약 1,500줄에서 약 33%, 초당 1만 5천 줄에서 약 65%를 버렸다. 이 실험의 DEBUG 구간도 초당 약 1,550줄(초당 50건 × 요청당 31줄)이지만, 수집기를 장애가 나도록 초당 16KB로 묶어 두었기 때문에 버리는 비율은 원문과 다르다. 원문도 drop이 시작되는 지점과 처리량의 절대값은 환경에 따라 달라진다고 했다.
+
+### 실험 3-D: 요청 스레드가 치르는 비용
+
+원문은 캡처 로직과 큐에 넣는 비용이 요청 스레드에 부담을 주는지 따로 쟀다. 초당 로그량을 약 1만 5천 줄로 맞추고 요청당 로그 수만 30배 다르게 해서(초당 50건 × 300줄, 초당 1,500건 × 10줄) 두 경우 모두 p95가 29ms인 것을 확인했다. 여기서는 초당 50건 × 요청당 300줄을 재고, 같은 부하에서 DEBUG를 끈 기준과 비교한다.
+
+1. 요청당 DEBUG 로그를 300줄로 바꿔 띄우고 DEBUG를 켠다.
+
+   ```bash
+   OTEL_AGENT=on SPRING_PROFILES_ACTIVE=trace,trace-aware DEBUG_LINES_PER_REQUEST=300 docker compose up -d
+   ```
+
+   ```bash
+   ./scripts/debug.sh on
+   ```
+
+2. 먼저 20초 부하로 데운다. 다시 띄운 직후의 JVM은 아직 JIT 컴파일 전이라 느려서, 그대로 재면 요청 스레드 비용이 아니라 데워지는 시간을 재게 된다. 이 결과는 버린다.
+
+   ```bash
+   RATE=50 DURATION=20s k6 run k6/load.js
+   ```
+
+3. 30초 잰다.
+
+   ```bash
+   RATE=50 DURATION=30s k6 run k6/load.js
+   ```
+
+4. DEBUG를 끄고 같은 부하로 기준을 잰다.
+
+   ```bash
+   ./scripts/debug.sh off
+   ```
+
+   ```bash
+   RATE=50 DURATION=30s k6 run k6/load.js
+   ```
+
+5. 기본값으로 되돌린다.
+
+   ```bash
+   docker compose up -d
+   ```
+
+**관찰 포인트**
+- 3번과 4번의 `http_req_duration` p95는? 요청 한 건이 로그를 300번 남기는데 응답 시간은 얼마나 늘었나?
+
+**더 해 보기:** 원문의 다른 쪽 조건(초당 1,500건 × 요청당 10줄)도 같은 순서로 잰다. `DEBUG_LINES_PER_REQUEST=10`으로 띄우고 `RATE=1500`으로 돌린다.
+
+### 생각해 볼 질문 (3단계)
+
+1. (3-B) AsyncAppender를 써도 스레드 이름(`[nio-8080-exec-1]`)은 제대로 찍히는데 trace_id는 왜 빈 값일까?
+2. (3-C) `TraceAwareAsyncAppender`는 trace_id를 언제, 어느 스레드에서 읽도록 바꿨나? 워커 스레드가 로그를 문자열로 만들 때는 무엇을 쓰나?
+3. (3-B, 3-C) 수집기는 여전히 초당 16KB인데 요청 스레드는 왜 더 이상 멈추지 않나? 나머지 로그는 어디로 갔나?
+4. (3-D) 요청 한 건이 로그를 300번 남겨도 응답 시간이 크게 늘지 않는다면 왜일까? 버려지는 로그는 메시지를 문자열로 만들기 전에 버려질까, 만든 뒤에 버려질까? (`AsyncAppenderBase.append`를 보자)
+5. 원문은 마지막에 "AsyncAppender로도 지속적인 과부하를 모두 해결할 수는 없다"고 했다. 이 해결책이 지켜 주는 것과 지켜 주지 못하는 것은 무엇일까?
+
+### 3단계 결과
+
+직접 실행(2026-10-08 21:08~21:38)한 값은 **(직접)**, Claude가 검증하며 돌린 값(`results/claude-verification/stage3/`)은 **(검증)**으로 구분했다. `trace-check.sh`와 3-D의 k6 결과는 파일로 남지 않아 검증 값으로 채웠다.
+
+**비교표** (직접, `results/compare-*`)
+
+| 이름 | DEBUG 동안 성공/초 | 503 | p95 | 최대 | 회복 | 로그 이벤트 | 출력된 줄 | 버림 | trace_id 빈 줄 |
+|---|---|---|---|---|---|---|---|---|---|
+| sync | 2.9 | 152 | 50.6s | 60.6s | 35초 | 7,928 | 7,928 | 0.0% | 0/7928 |
+| async | 50.0 | 0 | 14ms | 319ms | - | 95,091 | 7,808 | 91.8% | 7808/7808 |
+| trace-aware | 50.0 | 0 | 33ms | 374ms | - | 95,151 | 6,756 | 92.9% | 0/6756 |
+
+| 실험 | 관찰 항목 | 결과 |
+|---|---|---|
+| 3-A 동기 출력 | 보낸 trace_id가 찍힌 줄 / 장애 조건에서 성공/초, 503, p95 | 20/20 (검증) / 초당 2.9건, 503 152건, p95 50.6초 (직접) |
+| 3-B 기본 AsyncAppender | 보낸 trace_id가 찍힌 줄 / 장애 조건에서 성공/초, 503, p95, 버림 | 0/20 (검증) / 초당 50건, 503 0건, p95 14ms, 버림 91.8% (직접) |
+| 3-C TraceAwareAsyncAppender | 보낸 trace_id가 찍힌 줄 / 장애 조건에서 성공/초, 503, p95, 버림, 부하 중 trace_id 빈 줄 | 20/20 (검증) / 초당 50건, 503 0건, p95 33ms, 버림 92.9%, 빈 줄 0/6,756 (직접) |
+| 3-D 요청 스레드 비용 | p95 (DEBUG 300줄 / DEBUG 끈 기준) | 15ms / 7.5ms (검증). 더 해 보기(초당 1,500건 × 10줄)는 4.3ms / 15ms (검증) |
+
+**3단계에서 새로 알게 된 것**
+- 기본 AsyncAppender만으로도 장애는 사라졌다. 수집기는 그대로 초당 16KB인데 초당 50건을 모두 처리했고, 대신 로그의 92%를 버렸다. 그리고 출력된 7,808줄 모두 trace_id가 빈 값이었다. 원문의 표준 가이드가 AsyncAppender를 금지한 이유가 이것이다.
+- TraceAwareAsyncAppender는 같은 조건에서 로그를 93% 버렸지만, 출력된 요청 로그 6,756줄의 trace_id는 하나도 빠지지 않았다. 원문의 "로그를 버리는 동작과 trace_id를 보존하는 동작이 서로 간섭하지 않는다"와 같다.
+- 버림 비율의 절대값은 원문(33%, 65%)과 다르다. 이 환경은 장애를 재현하려고 수집기를 초당 16KB로 묶어 두었기 때문이다.
+- 다시 띄운 직후의 JVM으로 응답 시간을 재면 데워지는 시간까지 섞인다. 3-D 검증에서 데우지 않고 잰 초당 1,500건의 p95는 1.7초였고, 20초 데운 뒤에는 4.3ms였다.

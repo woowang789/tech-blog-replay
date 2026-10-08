@@ -22,6 +22,16 @@ services:
       # 로그 수집기(pv)가 stdout 파이프에서 초당 읽어 가는 바이트 수.
       # 평소 로그량(초당 약 7KB)은 넉넉히 감당하고, DEBUG를 켜면(초당 약 270KB) 못 따라가는 수준
       LOG_CONSUMER_RATE: ${LOG_CONSUMER_RATE:-16k}
+      # 3단계 스위치. 아무것도 안 주면 1·2단계와 같은 상태다
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}   # trace, async, trace-aware (logback-spring.xml 참고)
+      OTEL_AGENT: ${OTEL_AGENT:-off}                        # on이면 OpenTelemetry 에이전트를 붙인다
+      # DEBUG를 켰을 때 요청 한 건이 더 남기는 로그 줄 수 (3-D)
+      REPLAY_DEBUGLINESPERREQUEST: ${DEBUG_LINES_PER_REQUEST:-30}
+      # 에이전트를 붙여도 추적 데이터를 밖으로 보내지는 않는다 (trace_id만 쓴다)
+      OTEL_SERVICE_NAME: logging-outage
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
     ports:
       - "8080:8080" # API
       - "8081:8081" # actuator (메트릭, 로그 레벨, 스레드 덤프)

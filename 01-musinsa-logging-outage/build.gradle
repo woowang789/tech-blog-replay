@@ -17,19 +17,34 @@ repositories {
 	mavenCentral()
 }
 
+configurations {
+	// 3단계: 앱 이미지에 넣을 OpenTelemetry Java 에이전트
+	otelAgent
+}
+
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-actuator'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'io.opentelemetry:opentelemetry-api'
 	runtimeOnly 'com.mysql:mysql-connector-j'
+	otelAgent 'io.opentelemetry.javaagent:opentelemetry-javaagent:2.32.0'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// Dockerfile이 이미지에 넣을 수 있게 에이전트 jar를 build/agent/로 복사한다
+tasks.register('copyOtelAgent', Copy) {
+	from configurations.otelAgent
+	into layout.buildDirectory.dir('agent')
+	rename { 'opentelemetry-javaagent.jar' }
+}
+
 tasks.named('bootJar') {
 	archiveFileName = 'app.jar'
+	dependsOn 'copyOtelAgent'
 }
 
 tasks.named('test') {

@@ -6,6 +6,7 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY build/agent/opentelemetry-javaagent.jar opentelemetry-javaagent.jar
 COPY build/libs/app.jar app.jar
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
