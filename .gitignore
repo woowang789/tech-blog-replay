@@ -3,3 +3,9 @@
 
 ### IntelliJ IDEA (루트에서 연 프로젝트 설정) ###
 .idea/
+
+### 개인 기록 ###
+# 프로젝트별 개인 Q&A
+NOTE.md
+# Claude용 프로젝트 지침
+/.claude/CLAUDE.md
