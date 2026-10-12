@@ -22,4 +22,10 @@ public class NoticeHistoryService {
 		noticeHistoryRepository.save(new NoticeHistory(claimId, message, Instant.now()));
 	}
 
+	// 원문의 해결 ①: 위 메서드에서 REQUIRES_NEW만 뺐다. 바깥 트랜잭션에 참여해서 바깥 트랜잭션의 커넥션을 같이 쓴다
+	@Transactional
+	public void saveInOuterTransaction(long claimId, String message) {
+		noticeHistoryRepository.save(new NoticeHistory(claimId, message, Instant.now()));
+	}
+
 }

@@ -34,6 +34,8 @@ services:
       SPRING_CLOUD_AWS_SQS_LISTENER_MAXCONCURRENTMESSAGES: ${MAX_CONCURRENT_MESSAGES:-10}
       # 한 번에 가져오는 수는 동시 처리 수보다 클 수 없어서(Spring Cloud AWS가 검사한다) 같은 값으로 맞춘다
       SPRING_CLOUD_AWS_SQS_LISTENER_MAXMESSAGESPERPOLL: ${MAX_CONCURRENT_MESSAGES:-10}
+      # 3단계 스위치: false면 원문의 해결 ①(이력 저장의 REQUIRES_NEW 제거). 아무것도 안 주면 장애 그대로(true)다
+      REPLAY_HISTORYREQUIRESNEW: ${HISTORY_REQUIRES_NEW:-true}
     ports:
       - "8080:8080" # API (실험용 메시지 발행)
       - "8081:8081" # actuator (지표, 스레드 덤프)

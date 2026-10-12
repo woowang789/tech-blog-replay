@@ -41,3 +41,5 @@ replay:
   queue-name: notice-queue
   # 가짜 Messaging API가 응답하는 데 걸리는 시간
   messaging-api-latency: 200ms
+  # 이력 저장에 REQUIRES_NEW를 쓰는지. false면 원문의 해결 ①(REQUIRES_NEW 제거)이다
+  history-requires-new: true
