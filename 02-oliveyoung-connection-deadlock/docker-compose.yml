@@ -1,0 +1,35 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: replay
+      MYSQL_USER: replay
+      MYSQL_PASSWORD: replay
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  sqs:
+    # 로컬 SQS: SQS API를 그대로 흉내 내는 ElasticMQ. 9325는 큐 상태를 보는 웹 화면이다
+    image: softwaremill/elasticmq-native:1.7.1
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      sqs:
+        condition: service_started
+    environment:
+      DB_HOST: mysql
+      SQS_HOST: sqs
+    ports:
+      - "8080:8080" # API (실험용 메시지 발행)
+      - "8081:8081" # actuator (지표, 스레드 덤프)
+    stop_grace_period: 2s

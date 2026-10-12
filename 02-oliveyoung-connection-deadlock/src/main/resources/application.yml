@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: connection-deadlock
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/replay
+    username: replay
+    password: replay
+    hikari:
+      # Spring Boot 기본값을 그대로 적어 둔다
+      maximum-pool-size: 10
+      connection-timeout: 30000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: create
+  cloud:
+    aws:
+      # 로컬 SQS(ElasticMQ)는 인증을 보지 않지만 AWS SDK가 값을 요구해서 아무 값이나 넣는다
+      region:
+        static: ap-northeast-2
+      credentials:
+        access-key: local
+        secret-key: local
+      sqs:
+        endpoint: http://${SQS_HOST:localhost}:9324
+        listener:
+          # Spring Cloud AWS 기본값을 그대로 적어 둔다: 큐 하나에서 동시에 처리하는 메시지 수, 한 번에 가져오는 메시지 수
+          max-concurrent-messages: 10
+          max-messages-per-poll: 10
+
+management:
+  server:
+    # API(8080)와 포트·스레드 풀을 나눠서 장애 중에도 지표와 스레드 덤프를 볼 수 있다
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,threaddump
+
+replay:
+  queue-name: notice-queue
+  # 가짜 Messaging API가 응답하는 데 걸리는 시간
+  messaging-api-latency: 200ms
