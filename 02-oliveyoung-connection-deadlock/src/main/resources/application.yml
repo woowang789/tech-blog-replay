@@ -43,3 +43,15 @@ replay:
   messaging-api-latency: 200ms
   # 이력 저장에 REQUIRES_NEW를 쓰는지. false면 원문의 해결 ①(REQUIRES_NEW 제거)이다
   history-requires-new: true
+  # 4단계: 알림 구조. article은 올리브영 구조(1~3단계 코드), ledger는 권하는 구조(알림 원장 + outbox + 멱등 소비자)다
+  notice-design: article
+  notification-queue-name: notification-queue
+  # 4단계: 실패 주입 지점. none, publish, after-send, after-record (experiment/Fault 참고)
+  fault: none
+  # 4단계: 가짜 Messaging API가 멱등 키를 지원하는지
+  provider-idempotency: true
+  # 4단계: outbox 릴레이가 발행할 요청을 찾는 간격(ms)
+  relay-interval: 200
+  # 4단계: 선점 유효 시간. SENDING인 채 이보다 오래되면 다시 선점할 수 있다.
+  # 가시성 타임아웃(30초)보다 짧아야, 다시 들어온 메시지가 선점을 넘겨받는다
+  claim-lease: 20s

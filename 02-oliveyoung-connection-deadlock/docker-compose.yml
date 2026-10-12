@@ -36,6 +36,11 @@ services:
       SPRING_CLOUD_AWS_SQS_LISTENER_MAXMESSAGESPERPOLL: ${MAX_CONCURRENT_MESSAGES:-10}
       # 3단계 스위치: false면 원문의 해결 ①(이력 저장의 REQUIRES_NEW 제거). 아무것도 안 주면 장애 그대로(true)다
       REPLAY_HISTORYREQUIRESNEW: ${HISTORY_REQUIRES_NEW:-true}
+      # 4단계 스위치: 알림 구조(article, ledger), 실패 주입 지점(none, publish, after-send, after-record),
+      # 가짜 Messaging API의 멱등 키 지원. 아무것도 안 주면 1~3단계와 같다
+      REPLAY_NOTICEDESIGN: ${NOTICE_DESIGN:-article}
+      REPLAY_FAULT: ${FAULT:-none}
+      REPLAY_PROVIDERIDEMPOTENCY: ${PROVIDER_IDEMPOTENCY:-true}
     ports:
       - "8080:8080" # API (실험용 메시지 발행)
       - "8081:8081" # actuator (지표, 스레드 덤프)
