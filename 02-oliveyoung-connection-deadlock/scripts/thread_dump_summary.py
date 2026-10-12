@@ -2,10 +2,17 @@
 
 사용법: python3 scripts/thread_dump_summary.py results/thread-dump-시각.txt
 """
+import re
 import sys
 import unicodedata
 
-LISTENER = "sqsListenerEndpointContainer"  # Spring Cloud AWS가 메시지를 처리하는 스레드 이름
+# Spring Cloud AWS가 메시지를 처리하는 스레드. 이름이 "컨테이너 이름-번호"다 (예: ...sqsListenerEndpointContainer#0-3).
+# 같은 컨테이너의 보조 스레드(#0#message_source-N: 메시지 가져오기와 ack 모으기, #0-0-N: 스케줄러)는 뺀다
+LISTENER = re.compile(r'"[^"]*sqsListenerEndpointContainer#\d+-\d+"')
+
+
+def is_listener(block):
+    return LISTENER.match(block) is not None
 
 
 def pad(text, width):
@@ -49,7 +56,7 @@ LABELS = {
 
 
 def main(path):
-    listeners = [t for t in split_threads(open(path, encoding="utf-8").read()) if LISTENER in t.splitlines()[0]]
+    listeners = [t for t in split_threads(open(path, encoding="utf-8").read()) if is_listener(t)]
     groups = {key: [] for key in LABELS}
     for t in listeners:
         groups[classify(t)].append(t)
