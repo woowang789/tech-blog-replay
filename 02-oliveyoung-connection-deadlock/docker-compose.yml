@@ -13,11 +13,11 @@ services:
       retries: 30
 
   sqs:
-    # 로컬 SQS: SQS API를 그대로 흉내 내는 ElasticMQ. 9325는 큐 상태를 보는 웹 화면이다
+    # 로컬 SQS: SQS API를 그대로 흉내 내는 ElasticMQ. 앱은 compose 네트워크 안에서 sqs:9324로,
+    # 스크립트(watch.sh, queue.sh)는 내 컴퓨터에서 localhost:9324로 SQS API를 부른다
     image: softwaremill/elasticmq-native:1.7.1
     ports:
       - "9324:9324"
-      - "9325:9325"
 
   app:
     build: .

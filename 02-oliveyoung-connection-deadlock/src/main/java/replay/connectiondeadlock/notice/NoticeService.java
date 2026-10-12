@@ -2,6 +2,8 @@ package replay.connectiondeadlock.notice;
 
 import java.util.NoSuchElementException;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,11 +25,15 @@ public class NoticeService {
 
 	private final NoticeHistoryService noticeHistoryService;
 
+	// 알림 내역까지 저장해 처리를 끝낸 알림 수
+	private final Counter completed;
+
 	public NoticeService(ClaimRepository claimRepository, MessagingApiClient messagingApiClient,
-			NoticeHistoryService noticeHistoryService) {
+			NoticeHistoryService noticeHistoryService, MeterRegistry meterRegistry) {
 		this.claimRepository = claimRepository;
 		this.messagingApiClient = messagingApiClient;
 		this.noticeHistoryService = noticeHistoryService;
+		this.completed = Counter.builder("notice.completed").register(meterRegistry);
 	}
 
 	// 트랜잭션이 시작될 때 DB 커넥션을 하나 빌리고, 메서드가 끝나야 반납한다
@@ -40,6 +46,7 @@ public class NoticeService {
 		messagingApiClient.send(message);
 		// REQUIRES_NEW라서 커넥션을 하나 더 빌려야 한다
 		noticeHistoryService.save(claimId, message);
+		completed.increment();
 		log.info("알림 발송 완료 claimId={}", claimId);
 	}
 
