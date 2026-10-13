@@ -2,6 +2,9 @@ services:
   redis:
     # 원문은 Redis 버전을 밝히지 않았다. 최신 안정판을 쓴다
     image: redis:8.10.2
+    # 캐시 실험이라 RDB 스냅샷을 끈다. 기본값(save 60 10000 등)이면 키를 대량으로 채우고 60초 뒤
+    # 스냅샷을 위한 fork가 일어나, 실험 중에 전체 삭제와 상관없이 Redis가 잠깐 멈출 수 있다
+    command: ["redis-server", "--save", ""]
 
   app:
     build: .
