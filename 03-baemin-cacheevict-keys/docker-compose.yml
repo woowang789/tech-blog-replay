@@ -1,0 +1,18 @@
+services:
+  redis:
+    # 원문은 Redis 버전을 밝히지 않았다. 최신 안정판을 쓴다
+    image: redis:8.10.2
+
+  app:
+    build: .
+    depends_on:
+      redis:
+        condition: service_started
+    environment:
+      REDIS_HOST: redis
+      # 스위치: true면 캐시 쓰기를 원문(Spring Data Redis 3.3.7)처럼 동기로 한다. 아무것도 안 주면 4.x 기본값(비동기)이다
+      REPLAY_CACHEIMMEDIATEWRITES: ${CACHE_IMMEDIATE_WRITES:-false}
+    ports:
+      - "8080:8080" # API (상품 조회, 실험용 캐시 채우기와 전체 삭제)
+      - "8081:8081" # actuator (지표)
+    stop_grace_period: 2s
