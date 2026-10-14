@@ -12,12 +12,11 @@ import org.springframework.stereotype.Component;
 
 import replay.cacheevict.product.Product;
 
-// 실험용: products 캐시에 상품 count개를 한꺼번에 넣는다.
-// @Cacheable이 넣는 것과 같은 키(products::{id})와 값 형식으로 넣되, 한 건씩이 아니라 파이프라인으로 보내 빨리 채운다
+// 실험용: 캐시에 상품 count개를 한꺼번에 넣는다.
+// @Cacheable이 넣는 것과 같은 키(products::{id})와 값 형식으로 넣되, 한 건씩이 아니라 파이프라인으로 보내 빨리 채운다.
+// 2단계에서는 products가 아닌 다른 캐시(others::{id})도 채워, KEYS products::*가 무엇을 훑는지 본다
 @Component
 public class CacheSeeder {
-
-	private static final String CACHE_NAME = "products";
 
 	private static final int BATCH_SIZE = 10_000;
 
@@ -30,9 +29,9 @@ public class CacheSeeder {
 		this.cacheManager = cacheManager;
 	}
 
-	public void seed(int count) {
-		RedisCacheConfiguration config = ((RedisCache) cacheManager.getCache(CACHE_NAME)).getCacheConfiguration();
-		String keyPrefix = config.getKeyPrefixFor(CACHE_NAME);
+	public void seed(String cacheName, int count) {
+		RedisCacheConfiguration config = ((RedisCache) cacheManager.getCache(cacheName)).getCacheConfiguration();
+		String keyPrefix = config.getKeyPrefixFor(cacheName);
 		try (RedisConnection connection = connectionFactory.getConnection()) {
 			for (long from = 1; from <= count; from += BATCH_SIZE) {
 				connection.openPipeline();

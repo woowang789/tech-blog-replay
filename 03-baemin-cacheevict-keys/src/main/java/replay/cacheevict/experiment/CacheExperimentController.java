@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import replay.cacheevict.product.ProductService;
 
-// 실험용: 캐시를 채우고(seed), 원문의 @CacheEvict(allEntries = true)를 부른다(evict-all)
+// 실험용: 캐시를 채우고(seed, 기본은 products 캐시), 원문의 @CacheEvict(allEntries = true)를 부른다(evict-all)
 @RestController
 @RequestMapping("/experiments")
 public class CacheExperimentController {
@@ -24,10 +24,11 @@ public class CacheExperimentController {
 	}
 
 	@PostMapping("/seed")
-	public Map<String, Object> seed(@RequestParam(defaultValue = "1000000") int count) {
+	public Map<String, Object> seed(@RequestParam(defaultValue = "1000000") int count,
+			@RequestParam(defaultValue = "products") String cache) {
 		long started = System.nanoTime();
-		cacheSeeder.seed(count);
-		return Map.of("seeded", count, "elapsedMs", (System.nanoTime() - started) / 1_000_000);
+		cacheSeeder.seed(cache, count);
+		return Map.of("cache", cache, "seeded", count, "elapsedMs", (System.nanoTime() - started) / 1_000_000);
 	}
 
 	@PostMapping("/evict-all")
