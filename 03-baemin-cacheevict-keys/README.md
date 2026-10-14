@@ -32,7 +32,7 @@
 | 0. 사전 확인 | 최신 버전(Spring Boot 4.1.1, Spring Data Redis 4.1.1, Redis 8.10.2)에서도 기본 전략이 `KEYS`이고, 전체 삭제가 Redis를 멈추는가 | ✅ 완료 |
 | 1. 재현 | 상품 조회 부하 중에 전체 삭제를 부르면 다른 조회가 어떻게 되나. 원문처럼 동기로 지울 때(1-A)와 4.x 기본인 비동기로 지울 때(1-B) | ✅ 완료 |
 | 2. 원인 증명 | 1단계의 멈춤이 Redis(`KEYS`·`DEL` 실행), 앱의 Redis 연결, 앱 JVM(GC) 중 어디서 생겼는지 증거로 가른다(2-A 동기, 2-C 비동기). `KEYS`가 DB의 모든 키를 훑는지 본다(2-B) | ✅ 완료 |
-| 3. 해결책 재현 | 원문의 `SCAN` 전환과 그 한계 | |
+| 3. 해결책 재현 | 원문의 `SCAN` 전환(3-A)과 원문이 적은 두 한계(3-B 오래 걸림, 3-C 잠금), 원문의 조언(3-D `KEYS`를 막은 Redis, 3-E `DEL` 대신 `UNLINK`) | ✅ 완료 |
 | 4. 원문 너머 | 필요하면 정한다 | |
 
 ## 실험 환경
@@ -64,6 +64,13 @@ app 컨테이너 (Spring Boot, Lettuce, GC 로그) ─▶ Redis (RDB 스냅샷 �
 | 스위치 | 뜻 |
 |---|---|
 | `CACHE_IMMEDIATE_WRITES` | `true`면 캐시 쓰기를 원문(Spring Data Redis 3.3.7)처럼 동기로 한다(`RedisCacheWriter`의 `immediateWrites()`). 기본은 `false`, 4.x 기본값이다(아래 0단계 결과 참고) |
+| `CACHE_BATCH_STRATEGY` | `scan`이면 전체 삭제할 키를 `KEYS` 대신 `SCAN`으로 찾는다(`BatchStrategies.scan(n)`, 원문의 해결책). 기본은 `keys` (3단계) |
+| `CACHE_SCAN_BATCH_SIZE` | `SCAN` 한 번에 가져오고(`COUNT`) 한 번에 지우는 키 수. 기본 1000 (3단계) |
+| `CACHE_LOCKING` | `true`면 잠금을 쓰는 캐시 쓰기 도구로 바꾼다(`enableLocking()`). 기본 `false` (3단계) |
+| `REDIS_LAZYFREE_USER_DEL` | `yes`면 Redis가 `DEL`도 `UNLINK`처럼 메모리 해제를 백그라운드로 미룬다(`lazyfree-lazy-user-del`). 기본 `no` (3단계) |
+| `REDIS_KEYS_COMMAND` | 빈 값으로 주면(`REDIS_KEYS_COMMAND=`) Redis가 `KEYS`를 막는다(`rename-command KEYS ""`). 주지 않으면 그대로 (3단계) |
+
+스위치는 `docker compose up -d` 앞에 붙여 준다. 붙이지 않은 스위치는 기본값으로 돌아간다.
 
 ## 0단계: 사전 확인 결과
 
@@ -215,7 +222,7 @@ python3 scripts/scenario.py 1b-3m 3000000
 | SLOWLOG | Redis가 10ms 넘게 실행한 명령, 걸린 시간, 그 명령이 온 연결 | Redis 멈춤이 어느 명령 때문인지 |
 | 앱 연결 | 같은 `CLIENT LIST`로 본 앱의 Redis 연결. 0.1초마다 처리한 명령 수, 보낼 응답(Redis가 아직 다 보내지 못한 응답, `omem`), 받는 명령(Redis가 받고 있거나 받아 놓고 아직 끝내지 못한 명령, `qbuf` + `argv-mem`) | Redis는 한가한데 연결에 무엇이 걸려 있는지 |
 | GC 멈춤 | 앱 GC 로그(`/tmp/gc.log`)의 멈춤(10ms 이상). 그동안 앱의 모든 스레드가 선다 | 앱 JVM이 통째로 선 때 |
-| 스레드 덤프 | Redis가 처음 멈춘 것이 보이면 0.5초마다 12번, 앱에 `kill -3`(SIGQUIT)을 보내 앱 로그로 받는다. 전체 삭제를 부른 요청 스레드와 일하던 Lettuce I/O 스레드의 맨 위 프레임을 보여 준다 | 그때 앱 안에서 누가 무엇을 하고 있었는지 |
+| 스레드 덤프 | 전체 삭제가 시작된 것이 보이면 0.5초마다 12번, 앱의 관리 포트 actuator(`/actuator/threaddump`)에서 받는다. 전체 삭제를 부른 요청 스레드와 일하던 Lettuce I/O 스레드의 맨 위 프레임, 조회 요청 스레드가 무엇을 기다리는지 보여 준다. 2단계 직접 실행 때는 `kill -3`(SIGQUIT)으로 받았다. 바꾼 이유는 3단계에 적었다 | 그때 앱 안에서 누가 무엇을 하고 있었는지 |
 
 - 조회 연결은 삭제 전에 명령이 가장 많이 오간 앱 연결이다(1단계 NOTE의 동기 공유 연결). 비동기면 나머지 앱 연결(반응형 공유 연결)을 삭제 연결로 따로 보여 준다.
 - 바뀐 것: Redis 포트 6379를 열었다(수집기용). 앱이 GC 로그를 남긴다. 캐시 채우기에 다른 캐시를 채우는 옵션(`cache=others`)을 더했다.
@@ -308,6 +315,7 @@ python3 scripts/evidence.py 2c-async-3m 3000000
 
 - 2-C의 `UNLINK`는 +2.2~+6.9초에 삭제 연결로 나뉘어 오갔다(명령 46,974개).
 - 2-C에서는 수집기가 삭제 0.92초 전에 52ms짜리 Redis 응답을 한 번 봐서 스레드 덤프가 1초쯤 일찍 시작됐다(-0.60초부터).
+- **(3단계에서 알게 됨) 2단계 실행은 덤프 때문에 시간이 늘어났을 수 있다.** 2단계는 스레드 덤프를 `kill -3`으로 떴다. 3단계에서 같은 `SCAN` 전체 삭제를 재 보니, 덤프 없이 5.0~6.2초 걸리던 것이 `kill -3` 덤프 12번과 함께 10.4초가 걸렸다. 앱이 덤프를 표준 출력에 찍는 동안 모든 스레드가 서고, 덤프 하나가 1.2MB라 Docker 로그로 넘기는 일도 무겁다. 그래서 2-A의 `DEL`(2.11초)처럼 덤프가 뜨던 동안의 시간은 덤프 없이 잰 1-A(1,713ms)보다 길게 나왔을 수 있다. 덤프는 대개 Redis가 처음 멈춘 뒤(`KEYS`가 끝난 뒤)에 시작해서 `KEYS` 시간에는 영향이 적다. 다만 2-C는 덤프가 삭제 전에 시작했다. 멈춤이 어느 층에서 생겼는지 가른 결론은 그대로다.
 
 **2단계에서 새로 알게 된 것**
 - **원문이 든 원인이 맞았다.** 동기 경로에서 Redis가 멈춘 것은 `KEYS`(1.03초)와 `DEL`(2.11초)을 실행하는 동안이었다. Redis가 멈춘 구간과 SLOWLOG의 실행 시간이 맞았다.
@@ -319,3 +327,204 @@ python3 scripts/evidence.py 2c-async-3m 3000000
 - **비동기(2-C)는 조회 멈춤(938ms)이 `KEYS` 실행(926ms)과 거의 같았다.** `KEYS` 응답과 `UNLINK`가 조회와 다른 연결(반응형 연결)로 오가서 같은 연결의 줄이 생기지 않았다.
 - **짧은 멈춤은 대부분 앱 GC였다.** 2-A의 GC 422ms는 `401M->375M`로 거의 줄지 않아 살아 있는 객체가 많았다. 그때 앱은 키 300만 개를 Set(동기, 덤프 `HashMap.putVal`)이나 `ByteBuffer` 목록(비동기, 덤프 `KeyListOutput.set`)으로 힙에 들고 있었다.
 - **동기에서는 Tomcat 요청 스레드 200개가 모두 Redis 응답을 기다리며 묶였다.** +1.39초 덤프와 +3.78~+5.71초 덤프에서 200개 중 199개가 `doGet`에서 기다렸고, 나머지 하나는 전체 삭제 요청 스레드였다.
+
+## 3단계: 해결책 재현
+
+원문의 해결책은 전체 삭제할 키를 `KEYS` 대신 `SCAN`으로 찾게 바꾸는 것이다. `RedisCacheManagerBuilderCustomizer`로 캐시 쓰기 도구의 배치 전략을 `BatchStrategies.scan(n)`으로 바꿨다. 원문은 이 해결책의 한계 두 가지와 실무 조언 두 가지를 함께 적었다.
+- 한계 ①: `SCAN`도 결국 모든 키를 훑는다. 원문에서는 캐시가 많아 `SCAN` 호출이 무수히 많았고 API가 타임아웃(60초)났다.
+- 한계 ②: 잠금을 쓰는 캐시 쓰기 도구(`lockingRedisCacheWriter`)면 `SCAN`이어도 지우는 동안 막힌다.
+- 조언 ①: 운영 Redis는 `KEYS`를 막아 두는 경우가 많다(`rename-command KEYS ""`). 그러면 기본 전략에서 `RedisCommandExecutionException`이 난다.
+- 조언 ②: 키가 많으면 `DEL` 대신, 메모리 해제를 백그라운드로 미루는 `UNLINK`가 낫다(`lazyfree-lazy-user-del`).
+
+이 단계에서는 이것들을 2-A와 같은 조건(원문처럼 동기, 키 300만 개, 조회 초당 200건)에서 차례로 확인한다. 원문의 코드는 이미지라 `SCAN` 한 번에 몇 개씩(n) 찾았는지 알 수 없다. 여기서는 1,000개로 하고(3-A), 100개로 줄였을 때(3-B)도 본다.
+
+### 바뀐 것
+
+- 스위치 다섯 개를 더했다(실험 환경의 스위치 표).
+  - 4.x에서 동기 쓰기와 함께 고르려고 `RedisCacheWriter.create(...)`로 조합한다(`CacheWriterConfig`).
+  - 원문(3.3.7)은 `RedisCacheWriter.nonLockingRedisCacheWriter(factory, BatchStrategies.scan(n))`처럼 팩토리 메서드로 바꿨다. 이 메서드도 4.1.1에 남아 있다.
+- `evidence.py`
+  - 리포트 머리에 켜진 스위치를 적고, Redis가 받은 명령마다 횟수와 실행 시간 합(`INFO commandstats`)을 적는다.
+  - 결과가 섞였는지 보는 검사를 `SCAN`·잠금에 맞게 고쳤다. `SCAN`이면 `KEYS`가 0번이어야 하고, 동기면 `DEL`, 비동기면 `UNLINK`로 지운다.
+  - 스레드 덤프를 actuator(`/actuator/threaddump`)로 받는다. 2단계의 `kill -3`은 실험 자체를 크게 느리게 했다(아래 표). 앱이 덤프를 표준 출력에 찍는 동안 모든 스레드가 서고, Docker 로그로 넘기는 일도 무거워서다. 덤프를 끄려면 `DUMPS=0`을 앞에 붙인다.
+  - 덤프 요약에서 조회 요청 스레드가 무엇을 기다리는지(Redis 응답, 잠금, 쉼) 센다.
+  - `SCAN`으로 지우면 같은 모양이 오래 이어져서 0.1초 표는 앞 3초만 보인다.
+- `evict_once.py`(3-D): 부하 없이 전체 삭제를 한 번 부르고, 응답과 캐시가 실제로 비었는지, 앱 로그의 오류를 보여 준다.
+- `big_key_del.sh`(3-E): 값이 큰 키 하나를 `DEL`로 지울 때 `lazyfree-lazy-user-del` 설정에 따라 무엇이 다른지 본다.
+
+**측정 도구도 실험을 흔든다.** 같은 `SCAN` 전체 삭제(1,000개씩, 키 300만 개)를 재는 방법만 바꿔 돌린 값이다(Claude 검증).
+
+| 측정 | 전체 삭제 응답 | `SCAN` 한 번 평균 | `DEL` 한 번 평균 |
+|---|---|---|---|
+| 1단계 실행기(수집기·덤프 없음) | 6.24초 | 522µs | 847µs |
+| 수집기만 | 5.02초 | 420µs | 661µs |
+| 수집기 + actuator 덤프 12번 | 7.53초 | 581µs | 985µs |
+| 수집기 + `kill -3` 덤프 12번(2단계 방식) | 10.38초 | 1,033µs | 1,194µs |
+
+그래서 걸린 시간을 비교하는 3-A, 3-B, 3-E는 덤프를 끄고(`DUMPS=0`) 돌린다. 스레드가 무엇을 기다리는지 봐야 하는 3-C만 덤프를 뜬다. 비교 기준은 덤프 없이 잰 1-A 300만(1단계 직접 실행)이다.
+
+덤프를 꺼도 가끔 Redis가 수백 ms 멈춘다. 그때 SLOWLOG에는 키 1,000개짜리 `DEL` 하나가 279ms처럼, 명령이 할 일로는 설명되지 않게 오래 걸린 기록이 남는다(Claude 검증 3-A). 같은 조건이어도 실행마다 시간이 꽤 다르다(덤프 없는 3-A가 5.0초, 6.2초, 9.6초). 2단계의 원인 모를 멈춤과 같은 종류로, Redis 프로세스가 그 순간 CPU나 메모리를 제때 받지 못한 것으로 보인다. 이런 멈춤은 해결책의 효과로 보지 않는다.
+
+### 준비
+
+```bash
+./gradlew bootJar
+```
+
+### 실험 3-A: 원문의 해결책, SCAN으로 찾기
+
+```bash
+CACHE_IMMEDIATE_WRITES=true CACHE_BATCH_STRATEGY=scan docker compose up -d --build
+```
+
+```bash
+DUMPS=0 python3 scripts/evidence.py 3a-scan-1000 3000000
+```
+
+**관찰 포인트**
+- 1-A 300만(같은 조건에서 `KEYS`)과 비교해, 조회가 멈췄다가 풀린 때는 어떻게 달라졌나? Redis 멈춤은?
+- Redis가 받은 `SCAN`과 `DEL`은 몇 번인가? 키 300만 개를 어떻게 나눠 지웠나?
+- 전체 삭제 응답 시간과, Redis가 `SCAN`·`DEL`을 실행한 시간 합을 비교하면?
+
+### 실험 3-B: 한계 ①, 오래 걸린다
+
+`SCAN` 한 번에 100개씩 찾게 줄인다.
+
+```bash
+CACHE_IMMEDIATE_WRITES=true CACHE_BATCH_STRATEGY=scan CACHE_SCAN_BATCH_SIZE=100 docker compose up -d app
+```
+
+```bash
+DUMPS=0 python3 scripts/evidence.py 3b-scan-100 3000000
+```
+
+**관찰 포인트**
+- 전체 삭제 응답은 3-A의 몇 배인가? `SCAN`·`DEL` 횟수는?
+- 그중 Redis가 명령을 실행한 시간(실행 합)은 얼마인가? 나머지는 어디서 왔을까?
+
+### 실험 3-C: 한계 ②, 잠금을 쓰는 캐시 쓰기 도구
+
+`SCAN`(1,000개씩)은 그대로 두고 잠금을 켠다. 이번에는 덤프를 뜬다.
+
+```bash
+CACHE_IMMEDIATE_WRITES=true CACHE_BATCH_STRATEGY=scan CACHE_LOCKING=true docker compose up -d app
+```
+
+```bash
+python3 scripts/evidence.py 3c-locking 3000000
+```
+
+조회가 오래 막히면 k6가 조회 일부를 제때 보내지 못할 수 있다. 그때는 리포트에 `참고`로 적힌다. 다시 돌릴 일은 아니다.
+
+**관찰 포인트**
+- 조회가 멈춘 구간은 전체 삭제의 어디서부터 어디까지인가? 그동안 Redis는 멈췄나?
+- 스레드 덤프에서 조회 요청 스레드는 무엇을 기다리나?
+- Redis가 받은 잠금 확인(`EXISTS`)은 몇 번인가? 누가, 왜 보냈을까?
+
+### 실험 3-D: 원문의 조언 ①, KEYS를 막아 둔 Redis
+
+Redis가 `KEYS`를 막은 채(`REDIS_KEYS_COMMAND=`) 세 경우를 차례로 돌린다. 경우마다 키 1,000개를 채우고 전체 삭제를 한 번 부른다.
+
+원문처럼 동기, `KEYS`로 찾기:
+
+```bash
+CACHE_IMMEDIATE_WRITES=true REDIS_KEYS_COMMAND= docker compose up -d
+```
+
+```bash
+python3 scripts/evict_once.py 3d-sync-keys
+```
+
+4.x 기본(비동기), `KEYS`로 찾기:
+
+```bash
+REDIS_KEYS_COMMAND= docker compose up -d
+```
+
+```bash
+python3 scripts/evict_once.py 3d-async-keys
+```
+
+원문처럼 동기, `SCAN`으로 찾기:
+
+```bash
+CACHE_IMMEDIATE_WRITES=true CACHE_BATCH_STRATEGY=scan REDIS_KEYS_COMMAND= docker compose up -d
+```
+
+```bash
+python3 scripts/evict_once.py 3d-sync-scan
+```
+
+**관찰 포인트**
+- 세 경우의 전체 삭제 응답과, 캐시가 실제로 비었는지, 앱 로그의 오류는?
+- 4.x 기본 경로에서는 무엇이 다른가? 운영이라면 언제 알아챌 수 있을까?
+
+### 실험 3-E: 원문의 조언 ②, DEL 대신 UNLINK
+
+Redis가 `DEL`도 `UNLINK`처럼 다루게 하고(`REDIS_LAZYFREE_USER_DEL=yes`), 원문 경로(동기, `KEYS`)로 키 300만 개를 지운다.
+
+```bash
+CACHE_IMMEDIATE_WRITES=true REDIS_LAZYFREE_USER_DEL=yes docker compose up -d
+```
+
+```bash
+DUMPS=0 python3 scripts/evidence.py 3e-lazyfree 3000000
+```
+
+값이 큰 키 하나(필드 100만 개짜리 해시)를 지울 때와 비교한다.
+
+```bash
+./scripts/big_key_del.sh
+```
+
+끝나면 스위치를 모두 기본값으로 돌린다.
+
+```bash
+docker compose up -d
+```
+
+**관찰 포인트**
+- SLOWLOG의 `DEL` 시간과 Redis 멈춤을 1-A 300만(`lazyfree-lazy-user-del no`)과 비교하면?
+- 리포트의 "백그라운드로 넘겨 해제한 객체"는 몇 개인가?
+- 값이 큰 키 하나를 지울 때는 어떻게 다른가?
+
+### 생각해 볼 질문 (3단계)
+
+1. `SCAN`으로 바꾸면 Redis가 오래 멈추지 않는 이유는? 대신 무엇이 늘었나?
+2. 3-B에서 전체 삭제 시간의 대부분이 Redis 실행이 아니었다면, 원문처럼 앱과 Redis가 다른 서버일 때는 어떻게 될까? 원문의 API 타임아웃(60초)과 이어 보자.
+3. 잠금을 쓰는 캐시 쓰기 도구는 무엇을 막으려고 있을까? 그 대가는?
+4. `UNLINK`(lazyfree)가 효과를 보는 것은 어떤 키를 지울 때인가? 이 실험의 키는 어떤 키인가?
+5. 원문은 결론으로 `allEntries = true`를 쓰지 말라고 했다. 캐시를 통째로 비워야 할 때, Redis를 붙잡지 않는 다른 방법은 무엇이 있을까?
+
+### 3단계 결과
+
+직접 실행(2026-10-14. 3-A 15:22, 3-B 16:17, 3-C 22:30, 3-D 22:44~22:50, 3-E 22:54)한 값이다. 모두 `주의` 없이 끝났다(3-C는 `참고` 하나). Claude가 검증하며 돌린 값은 `results/claude-verification/stage3/`에 있다.
+
+| 관찰 항목 | 3-A SCAN 1,000개씩 | 3-B SCAN 100개씩 | 3-C 잠금 | 3-E DEL을 UNLINK처럼 |
+|---|---|---|---|---|
+| 전체 삭제 응답 | 7.02초 | 16.31초 | 9.81초 | 10.21초 |
+| Redis가 받은 명령 (횟수, 실행 합) | `SCAN` 2,996번(1.90초)<br>`DEL` 3,001번(2.74초) | `SCAN` 29,605번(2.57초)<br>`DEL` 30,000번(3.47초) | `SCAN` 2,996번(2.30초)<br>`DEL` 3,001번(3.52초)<br>`EXISTS` 39,368번(386ms) | `KEYS` 1번(1.11초)<br>`DEL` 1번(4.16초) |
+| 조회가 멈췄다가 풀린 때 (가장 긴 멈춤) | +2.96~+3.07초 (106ms). 100ms 넘게 기다린 조회는 1건 | 없음 | +0.04~+10.27초 (9.88초). 전체 삭제 내내 | +0.05~+1.52초 (1.43초)<br>+3.58~+10.72초 (6.73초)<br>그 사이 GC·Redis로 짧게 3번(최대 253ms) |
+| Redis 멈춤 | 없음(수집기 답 최대 49ms) | +0.14초 73ms, +15.03초 50ms | +3.44초 85ms | +0.06~+1.17초(1.12초)<br>+5.84~+10.18초(4.34초)<br>그 밖 194ms, 63ms |
+| 백그라운드로 넘겨 해제한 객체 | - | - | - | 0개 |
+
+| 관찰 항목 | 3-D 동기 + KEYS | 3-D 4.x 기본 + KEYS | 3-D 동기 + SCAN |
+|---|---|---|---|
+| 전체 삭제 응답 | HTTP 500 (151ms) | HTTP 200 (16ms) | HTTP 200 (22ms) |
+| 캐시 키 (삭제 전 → 2초 뒤) | 1,000 → 1,000 | 1,000 → 1,000 | 1,000 → 0 |
+| 앱 로그의 오류 | `RedisCommandExecutionException: ERR unknown command 'KEYS', with args beginning with: 'products::*'` | 없음 | 없음 |
+
+- 값이 큰 키 하나(`big_key_del.sh`, Claude 검증 값. 직접 실행 출력은 파일로 남지 않았다): `lazyfree-lazy-user-del no`면 필드 100만 개 해시 하나의 `DEL` 응답까지 53ms(백그라운드 0개), `yes`면 1ms(백그라운드 1개).
+- 3-C에서 덤프 12번 중 첫 번째(+0.85초)는 조회 요청 스레드 121개, 나머지 11번은 199개가 모두 잠금 대기였다. 조회가 오래 막혀 k6가 조회 233건을 제때 보내지 못했다(`참고`).
+- `SCAN`으로 지운 실행(3-A·3-C, Claude 검증 포함)은 삭제를 시작한 직후에 Redis 답이 10~80ms로 느려지곤 했다. SLOWLOG에도 할 일보다 훨씬 오래 걸린 `SCAN`·`DEL`(10~38ms)이 몰렸다. 원인은 확인하지 않았다.
+- 3-E는 Redis 설정과 상관없는 앱 쪽 일(키 300만 개를 받아 `DEL` 명령을 만들기, +1.44~+5.47초)도 2-A의 두 배 가까이 걸렸다. 실행 전체가 느렸던 것으로 보고, `DEL` 4.16초를 lazyfree 탓으로 보지 않는다. Claude 검증의 3-E는 `DEL` 2.12초로, lazyfree를 끈 2-A(2.11초)와 같았다.
+
+**3단계에서 새로 알게 된 것**
+- **원문의 해결책대로 `SCAN`으로 찾으니 Redis가 멈추지 않았다(3-A).** 같은 조건에서 `KEYS`로 지운 1-A 300만은 조회 909건이 100ms 넘게 기다렸고 가장 긴 멈춤이 3.09초였다. 3-A는 100ms 넘게 기다린 조회가 1건(106ms)이었고, Redis가 50ms 넘게 답하지 못한 때가 없었다. 가장 오래 걸린 명령도 `DEL` 31ms였다. 조회 연결에 큰 응답이나 명령도 걸리지 않았다. `SCAN` 응답과 `DEL` 명령이 하나에 약 23.6KB였다.
+- **대신 전체 삭제는 길어지고 명령이 많아졌다.** 3-A는 7.02초(1-A 5.09초)에 명령 약 6,000개(1-A는 2개)였다. Redis 실행 합도 4.64초로 1-A(`KEYS` 876ms + `DEL` 1,713ms)보다 길었다.
+- **`SCAN`을 100개씩으로 줄이니(3-B) 전체 삭제가 16.31초가 됐다.** 명령은 59,605개로 3-A의 10배였다. Redis가 명령을 실행한 시간은 6.04초뿐이고, 나머지 10.3초(63%)는 명령을 주고받고 앱이 처리하는 데 쓰였다. 조회는 한 번도 100ms 넘게 기다리지 않았다.
+- **잠금을 켜면(3-C) `SCAN`이어도 조회가 전체 삭제 내내 막혔다.** +0.04~+10.27초 동안 조회 1,792건이 100ms 넘게 기다렸고 가장 긴 것은 9.88초였다. 그동안 Redis는 거의 멈추지 않았다(85ms 한 번). 조회 요청 스레드가 모두 잠금 키(`products~lock`)가 사라지기를 기다렸다. 50ms마다 잠금 키를 확인해서 `EXISTS`가 39,368번 왔다. 스레드 200개가 9.8초 동안 50ms마다 확인한 수(약 39,200)와 맞는다. 멈추는 곳이 Redis에서 앱의 요청 스레드로 옮겨 갔다.
+- **`KEYS`를 막은 Redis(3-D)에서 원문 경로(동기)는 원문대로 `RedisCommandExecutionException`이 났다.** 응답은 500이었고 캐시는 그대로였다.
+- **원문과 다른 점: 4.x 기본(비동기)은 같은 상황에서 조용히 실패했다.** 응답은 200이었고 앱 로그에 오류가 없었지만 캐시는 지워지지 않았다. Redis는 똑같이 거절했다. 다만 Spring Data Redis가 비동기 삭제의 결과(`CompletableFuture`)를 받아 보지 않고 버려서 오류가 사라졌다. `SCAN`으로 찾는 동기 경로는 제대로 지웠다.
+- **원문과 다른 점: `DEL`을 `UNLINK`처럼 처리하게 해도(3-E) 키 300만 개는 메인 스레드가 지웠다.** 백그라운드로 넘겨 해제한 객체가 0개였고, `DEL`이 Redis를 4.16초 붙잡았다. 원문은 키가 많으면 `UNLINK`가 낫다고 했지만, Redis는 값마다 해제할 일의 양을 어림해 원소가 많은 컬렉션(필드가 많아 해시테이블로 저장된 해시 등)만 백그라운드로 넘긴다. 문자열은 50MB여도 그 자리에서 해제한다(Claude 확인). 이 실험의 값은 약 105바이트짜리 문자열이다. 값이 큰 키 하나(해시 필드 100만 개)는 `UNLINK`처럼 처리하면 백그라운드로 넘어가 `DEL` 응답이 53ms에서 1ms로 줄었다(Claude 검증). 1-B·2-C의 비동기 경로가 `UNLINK`로 Redis를 오래 붙잡지 않은 것도 lazyfree 덕이 아니라 64개씩 나눠 지웠기 때문으로 보인다.
+- **같은 조건이어도 실행마다 시간이 꽤 달랐다.** 직접 실행과 Claude 검증이 3-A 7.02초와 5.02~9.57초, 3-B 16.31초와 26.38초, 3-C 9.81초와 12.61초, 3-E 10.21초와 6.12초였다. 그래서 해결책끼리는 걸린 시간보다 조회가 막혔는지, Redis가 멈췄는지로 비교했다.

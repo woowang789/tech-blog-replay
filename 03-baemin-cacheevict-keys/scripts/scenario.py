@@ -51,14 +51,19 @@ def redis(*command):
     return compose_exec("redis", "redis-cli", *command)
 
 
-def command_calls():
-    # "cmdstat_keys:calls=1,usec=213000,..." 줄에서 명령별 호출 수를 읽는다
-    calls = {}
+def command_stats():
+    # "cmdstat_keys:calls=1,usec=213000,..." 줄에서 명령별 (호출 수, Redis가 실행에 쓴 시간 합 µs)를 읽는다
+    stats = {}
     for line in redis("INFO", "commandstats").splitlines():
         if line.startswith("cmdstat_"):
-            command, stats = line[len("cmdstat_"):].split(":", 1)
-            calls[command] = int(dict(item.split("=") for item in stats.split(","))["calls"])
-    return calls
+            command, values = line[len("cmdstat_"):].split(":", 1)
+            fields = dict(item.split("=") for item in values.split(","))
+            stats[command] = (int(fields["calls"]), int(fields["usec"]))
+    return stats
+
+
+def command_calls():
+    return {command: calls for command, (calls, _) in command_stats().items()}
 
 
 def ready():
@@ -66,6 +71,43 @@ def ready():
         return json.loads(request("http://localhost:8081/actuator/health"))["status"] == "UP"
     except OSError:
         return False
+
+
+def wait_ready():
+    # docker compose up -d 직후에 실행해도 되게 앱이 뜰 때까지 기다린다. 3분 안에 안 뜨면 멈춘다
+    for i in range(90):
+        if ready():
+            return
+        if i == 0:
+            print("앱이 뜰 때까지 기다린다...")
+        time.sleep(2)
+    sys.exit("앱이 3분 안에 뜨지 않았다. docker compose ps와 docker compose logs app으로 확인한다")
+
+
+def current_settings():
+    # 지금 떠 있는 앱과 Redis의 스위치. 결과 머리에 남기고, 결과가 섞였는지 볼 때 쓴다
+    def env(key):
+        return compose_exec("app", "printenv", key)
+
+    return {
+        "immediate": env("REPLAY_CACHEIMMEDIATEWRITES") == "true",
+        "scan": env("REPLAY_CACHEBATCHSTRATEGY") == "scan",
+        "batch": int(env("REPLAY_CACHESCANBATCHSIZE") or 0),
+        "locking": env("REPLAY_CACHELOCKING") == "true",
+        "lazyfree": redis("CONFIG", "GET", "lazyfree-lazy-user-del").splitlines()[-1] == "yes",
+        "keys": redis("COMMAND", "INFO", "KEYS") != "",
+    }
+
+
+def describe_settings(settings):
+    app = ["원문처럼 동기" if settings["immediate"] else "4.x 기본(비동기)",
+           f"SCAN {settings['batch']:,}개씩으로 찾기" if settings["scan"] else "KEYS로 찾기"]
+    if settings["locking"]:
+        app.append("잠금 켬")
+    server = ["DEL도 UNLINK처럼(lazyfree-lazy-user-del yes)"] if settings["lazyfree"] else []
+    if not settings["keys"]:
+        server.append("KEYS 막음")
+    return f"캐시 쓰기 {', '.join(app)}" + (f" / Redis {', '.join(server)}" if server else "")
 
 
 def run_k6(out):
@@ -111,34 +153,44 @@ def stalls(rel):
     return merged
 
 
-def checks(immediate, count, keys_before, calls, evicts, dropped):
+def checks(settings, count, keys_before, calls, evicts, dropped):
     warnings = []
     if keys_before != count:
         warnings.append(f"삭제 전 Redis 키가 {keys_before:,}개로 채운 수와 다르다. 앞 실행의 삭제가 아직 돌고 있었을 수 있다")
     if len(evicts) != 1 or evicts[0][3] != "200":
-        warnings.append("전체 삭제가 한 번 성공하지 않았다")
-    if calls.get("keys", 0) != 1:
+        status = ", ".join(e[3] or "응답 없음" for e in evicts) or "보내지 않음"
+        warnings.append(f"전체 삭제가 한 번 성공하지 않았다(HTTP 상태 {status})")
+    # 지울 키는 KEYS 한 번(기본)이나 SCAN 여러 번(scan)으로 찾는다. 다르면 이번 실행 말고도 전체 삭제를 부른 곳이 있거나
+    # 앱이 다른 설정으로 떠 있다
+    if settings["scan"] and (calls.get("keys", 0) or not calls.get("scan")):
+        warnings.append(f"앱은 SCAN으로 찾게 떠 있는데 Redis가 받은 KEYS가 {calls.get('keys', 0)}번, SCAN이 {calls.get('scan', 0)}번이다")
+    if not settings["scan"] and calls.get("keys", 0) != 1:
         warnings.append(f"Redis가 받은 KEYS가 {calls.get('keys', 0)}번이다. 이번 실행 말고도 전체 삭제를 부른 곳이 있다")
-    # 동기는 DEL 한 번으로, 비동기는 UNLINK 여러 번으로 지운다(0단계 결과). 반대면 앱이 다른 설정으로 떠 있다
-    if immediate and (calls.get("del", 0) != 1 or "unlink" in calls):
+    # 동기는 DEL로(KEYS로 찾으면 한 번에), 비동기는 UNLINK 여러 번으로 지운다(0단계 결과). 잠금을 켜면 잠금을 풀 때도 DEL을 쓴다.
+    # 반대면 앱이 다른 설정으로 떠 있다
+    one_del = not settings["scan"] and not settings["locking"]
+    if settings["immediate"] and ("unlink" in calls or not calls.get("del") or (one_del and calls["del"] != 1)):
         warnings.append("앱은 동기로 떠 있는데 Redis가 받은 삭제 명령이 다르다. 앱 이미지를 새로 빌드했는지 확인한다")
-    if not immediate and ("unlink" not in calls or "del" in calls):
+    if not settings["immediate"] and ("unlink" not in calls or ("del" in calls and not settings["locking"])):
         warnings.append("앱은 비동기로 떠 있는데 Redis가 받은 삭제 명령이 다르다. 앱 이미지를 새로 빌드했는지 확인한다")
-    if dropped:
+    # 잠금을 켜면 조회가 삭제 내내 막혀 미리 만든 VU가 모자랄 수 있다. 그때는 다시 돌릴 일이 아니라 현상의 일부다
+    notes = []
+    if dropped and settings["locking"]:
+        notes.append(f"조회가 오래 막혀 k6가 조회 {dropped}건을 제때 보내지 못했다(VU가 모두 기다리는 중). 그만큼 덜 셌다")
+    elif dropped:
         warnings.append(f"k6가 조회 {dropped}건을 제때 보내지 못했다")
-    return [f"주의: {w}" for w in warnings] + (["  → 다시 돌린다"] if warnings else [])
+    return [f"주의: {w}" for w in warnings] + (["  → 다시 돌린다"] if warnings else []) + [f"참고: {n}" for n in notes]
 
 
-def report(name, immediate, count, keys_before, calls, reads, evicts, dropped):
-    mode = "원문처럼 동기" if immediate else "4.x 기본(비동기)"
+def report(name, settings, count, keys_before, calls, reads, evicts, dropped):
     lines = [
         f"== {name} ({time.strftime('%H:%M:%S')})",
-        f"설정: 캐시 쓰기 {mode}, 캐시 키 {count:,}개",
-        f"      조회 초당 {RATE}건(인기 상품 {HOT:,}개 중 하나), 부하 {EVICT_AT_SECONDS}초째에 전체 삭제 1번",
-        f"Redis가 받은 명령: KEYS {calls.get('keys', 0)}번, DEL {calls.get('del', 0)}번, UNLINK {calls.get('unlink', 0):,}번"
-        f" (삭제 전 키 {keys_before:,}개)",
+        f"설정: {describe_settings(settings)}",
+        f"      캐시 키 {count:,}개, 조회 초당 {RATE}건(인기 상품 {HOT:,}개 중 하나), 부하 {EVICT_AT_SECONDS}초째에 전체 삭제 1번",
+        f"Redis가 받은 명령: KEYS {calls.get('keys', 0)}번, SCAN {calls.get('scan', 0):,}번, DEL {calls.get('del', 0):,}번,"
+        f" UNLINK {calls.get('unlink', 0):,}번 (삭제 전 키 {keys_before:,}개)",
     ]
-    lines += checks(immediate, count, keys_before, calls, evicts, dropped)
+    lines += checks(settings, count, keys_before, calls, evicts, dropped)
     if not evicts:
         return lines
 
@@ -194,13 +246,8 @@ def report(name, immediate, count, keys_before, calls, reads, evicts, dropped):
 
 def main(name, count):
     os.chdir(Path(__file__).resolve().parent.parent)
-    for i in range(90):
-        if ready():
-            break
-        if i == 0:
-            print("앱이 뜰 때까지 기다린다...")
-        time.sleep(2)
-    immediate = compose_exec("app", "printenv", "REPLAY_CACHEIMMEDIATEWRITES") == "true"
+    wait_ready()
+    settings = current_settings()
 
     # 앞 실행이 남긴 것을 치운다. 앞 실행의 비동기 삭제가 아직 돌고 있으면 새로 채운 키까지 지울 수 있어서,
     # 다 채우고 앱을 데운 뒤 키 수를 다시 센다
@@ -220,7 +267,7 @@ def main(name, count):
     calls = command_calls()
     reads, evicts, dropped = load(out / "k6.csv")
 
-    lines = report(name, immediate, count, keys_before, calls, reads, evicts, dropped)
+    lines = report(name, settings, count, keys_before, calls, reads, evicts, dropped)
     print("\n".join(lines))
     (out / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

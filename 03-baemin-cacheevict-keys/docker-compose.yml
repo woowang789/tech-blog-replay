@@ -4,7 +4,10 @@ services:
     image: redis:8.10.2
     # 캐시 실험이라 RDB 스냅샷을 끈다. 기본값(save 60 10000 등)이면 키를 대량으로 채우고 60초 뒤
     # 스냅샷을 위한 fork가 일어나, 실험 중에 전체 삭제와 상관없이 Redis가 잠깐 멈출 수 있다
-    command: ["redis-server", "--save", ""]
+    # 스위치(3단계): REDIS_LAZYFREE_USER_DEL=yes면 DEL도 UNLINK처럼 메모리 해제를 백그라운드로 미룬다(원문의 조언).
+    # REDIS_KEYS_COMMAND를 빈 값으로 주면 운영처럼 KEYS를 막는다(rename-command KEYS ""). 주지 않으면 KEYS를 그대로 둔다
+    command: ["redis-server", "--save", "", "--lazyfree-lazy-user-del", "${REDIS_LAZYFREE_USER_DEL:-no}",
+              "--rename-command", "KEYS", "${REDIS_KEYS_COMMAND-KEYS}"]
     ports:
       - "6379:6379" # 2단계 증거 수집기가 앱과 따로 연결해 Redis 응답과 앱 연결의 버퍼를 본다
 
@@ -17,6 +20,12 @@ services:
       REDIS_HOST: redis
       # 스위치: true면 캐시 쓰기를 원문(Spring Data Redis 3.3.7)처럼 동기로 한다. 아무것도 안 주면 4.x 기본값(비동기)이다
       REPLAY_CACHEIMMEDIATEWRITES: ${CACHE_IMMEDIATE_WRITES:-false}
+      # 스위치(3단계): scan이면 전체 삭제할 키를 KEYS 대신 SCAN으로 찾는다(원문의 해결책).
+      # CACHE_SCAN_BATCH_SIZE는 SCAN 한 번에 가져오고 한 번에 지우는 키 수다
+      REPLAY_CACHEBATCHSTRATEGY: ${CACHE_BATCH_STRATEGY:-keys}
+      REPLAY_CACHESCANBATCHSIZE: ${CACHE_SCAN_BATCH_SIZE:-1000}
+      # 스위치(3단계): true면 잠금을 쓰는 캐시 쓰기 도구로 바꾼다(원문이 SCAN이어도 막힌다고 경고한 경우)
+      REPLAY_CACHELOCKING: ${CACHE_LOCKING:-false}
     ports:
       - "8080:8080" # API (상품 조회, 실험용 캐시 채우기와 전체 삭제)
       - "8081:8081" # actuator (지표)
