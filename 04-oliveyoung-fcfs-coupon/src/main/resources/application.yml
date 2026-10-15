@@ -1,0 +1,37 @@
+spring:
+  application:
+    name: fcfs-coupon
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/replay
+    username: replay
+    password: replay
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: create
+  data:
+    redis:
+      # 발급 수량 관리 저장소. 원문처럼 DB 대신 Redis에서 수량을 읽는다
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+  rabbitmq:
+    # 원문의 Message Queue. 온라인몰(앞단)이 발급 요청을 발행하고 발급 워커가 소비한다
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: replay
+    password: replay
+
+management:
+  server:
+    # API(8080)와 포트·스레드 풀을 나눠서 부하 중에도 지표를 볼 수 있다
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+
+replay:
+  # 발급 요청 메시지가 오가는 큐 이름
+  queue-name: coupon-issue
+  # 발급 워커가 동시에 처리하는 메시지 수(리스너의 소비자 스레드 수). 운영에서는 워커가 여럿이라 1보다 크다
+  worker-concurrency: 4

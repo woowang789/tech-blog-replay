@@ -1,0 +1,53 @@
+services:
+  redis:
+    image: redis:8.10.2
+    # 발급 수량을 관리하는 저장소. 실험마다 지웠다가 다시 쓰는 값뿐이라 RDB 스냅샷을 끈다
+    command: ["redis-server", "--save", ""]
+
+  rabbitmq:
+    # 원문의 Message Queue. 올리브영 쿠폰 시스템은 RabbitMQ를 쓴다(원문이 링크한 "쿠폰 발급 RabbitMQ 도입기")
+    image: rabbitmq:4-management
+    environment:
+      # 기본 사용자 guest는 localhost에서만 접속할 수 있어서, 다른 컨테이너(app)가 쓸 사용자를 만든다
+      RABBITMQ_DEFAULT_USER: replay
+      RABBITMQ_DEFAULT_PASS: replay
+    ports:
+      - "15672:15672" # 관리 화면 http://localhost:15672 (replay / replay). 큐에 쌓인 메시지와 소비자 수를 볼 수 있다
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: replay
+      MYSQL_USER: replay
+      MYSQL_PASSWORD: replay
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      # 발급 워커가 동시에 처리하는 메시지 수. 아무것도 안 주면 4다
+      REPLAY_WORKERCONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    ports:
+      - "8080:8080" # API (쿠폰 발급 요청, 실험용 초기화·집계)
+      - "8081:8081" # actuator (지표)
+    stop_grace_period: 2s
