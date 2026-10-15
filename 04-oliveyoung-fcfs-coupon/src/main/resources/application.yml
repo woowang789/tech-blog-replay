@@ -2,7 +2,8 @@ spring:
   application:
     name: fcfs-coupon
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:3306/replay
+    # sslMode=DISABLED: 기본값(PREFERRED)이면 MySQL 8.4와 TLS로 맺는다. 워커가 발급마다 DB에 쓰는 비용에서 TLS 암호화 CPU를 뺀다
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/replay?sslMode=DISABLED
     username: replay
     password: replay
   jpa:
@@ -20,6 +21,11 @@ spring:
     port: 5672
     username: replay
     password: replay
+    cache:
+      channel:
+        # 발행에 쓰는 채널을 Tomcat 요청 스레드 수(200)만큼 캐시한다. 기본 25개면 동시 발행이 그보다 많을 때
+        # 요청마다 채널을 열고 닫아(브로커 왕복 2번, 캐시 잠금 안에서) 응답이 급격히 느려진다
+        size: 200
 
 management:
   server:
@@ -34,4 +40,4 @@ replay:
   # 발급 요청 메시지가 오가는 큐 이름
   queue-name: coupon-issue
   # 발급 워커가 동시에 처리하는 메시지 수(리스너의 소비자 스레드 수). 운영에서는 워커가 여럿이라 1보다 크다
-  worker-concurrency: 4
+  worker-concurrency: 8

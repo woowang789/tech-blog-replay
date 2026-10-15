@@ -20,6 +20,7 @@ import replay.fcfscoupon.coupon.IssueFailureRepository;
 import replay.fcfscoupon.issue.GapStatistics;
 import replay.fcfscoupon.issue.IssueCountStore;
 import replay.fcfscoupon.issue.ResponseCounters;
+import replay.fcfscoupon.issue.WorkerCounters;
 
 // 실험용: 실험 전에 모든 상태를 비우고 쿠폰을 하나 만들며(reset), 실험 뒤에 결과를 한눈에 모은다(summary)
 @RestController
@@ -40,13 +41,15 @@ class ExperimentController {
 
 	private final GapStatistics gaps;
 
+	private final WorkerCounters handled;
+
 	private final AmqpAdmin amqp;
 
 	private final String queueName;
 
 	ExperimentController(CouponRepository coupons, CouponCatalog catalog, CouponIssueRepository issues,
 			IssueFailureRepository failures, IssueCountStore counts, ResponseCounters responses, GapStatistics gaps,
-			AmqpAdmin amqp, @Value("${replay.queue-name}") String queueName) {
+			WorkerCounters handled, AmqpAdmin amqp, @Value("${replay.queue-name}") String queueName) {
 		this.coupons = coupons;
 		this.catalog = catalog;
 		this.issues = issues;
@@ -54,6 +57,7 @@ class ExperimentController {
 		this.counts = counts;
 		this.responses = responses;
 		this.gaps = gaps;
+		this.handled = handled;
 		this.amqp = amqp;
 		this.queueName = queueName;
 	}
@@ -67,6 +71,7 @@ class ExperimentController {
 		counts.delete(couponId);
 		responses.reset();
 		gaps.reset();
+		handled.reset();
 		Coupon coupon = coupons.save(new Coupon(couponId, limit, Instant.now().plus(Duration.ofDays(1))));
 		catalog.refresh(coupon);
 		return coupon;
@@ -80,6 +85,18 @@ class ExperimentController {
 		return new Summary(couponId, coupon.getIssueLimit(), counts.get(couponId), responses.success(),
 				responses.soldOut(), issued, failures.countByCouponId(couponId), Math.max(0, issued - coupon.getIssueLimit()),
 				queue == null ? -1 : queue.getMessageCount(), queue == null ? -1 : queue.getConsumerCount(), gaps.snapshot());
+	}
+
+	// 실험 중 0.1초마다 읽어도 가벼운 진행 상태(1단계 실행기가 쓴다). DB는 세지 않는다. 발급 누계는 Redis 수량으로 본다
+	@GetMapping("/progress")
+	Progress progress(@RequestParam(defaultValue = "C001") String couponId) {
+		QueueInformation queue = amqp.getQueueInfo(queueName);
+		return new Progress(responses.success(), responses.soldOut(), counts.get(couponId), handled.handledCount(),
+				queue == null ? -1 : queue.getMessageCount());
+	}
+
+	// handled: 워커가 처리를 끝낸 수(발급 + 미발급). queued: 큐에서 기다리는 수(워커가 미리 가져간 메시지는 뺀 값)
+	record Progress(long successResponses, long soldOutResponses, long redisCount, long handled, long queued) {
 	}
 
 	// successResponses: "발급 성공" 응답 수, issued: 실제 발급 수(DB), unissued: 워커 2차 검증 실패 수(= 미발급, DB),

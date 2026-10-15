@@ -28,13 +28,16 @@ public class IssueWorker {
 
 	private final GapStatistics gaps;
 
+	private final WorkerCounters handled;
+
 	public IssueWorker(CouponCatalog coupons, IssueCountStore counts, CouponIssueRepository issues,
-			IssueFailureRepository failures, GapStatistics gaps) {
+			IssueFailureRepository failures, GapStatistics gaps, WorkerCounters handled) {
 		this.coupons = coupons;
 		this.counts = counts;
 		this.issues = issues;
 		this.failures = failures;
 		this.gaps = gaps;
+		this.handled = handled;
 	}
 
 	// concurrency: 동시에 처리하는 메시지 수. 운영의 워커 여러 대를 소비자 스레드 수로 흉내 낸다
@@ -47,10 +50,12 @@ public class IssueWorker {
 		if (counts.get(coupon.getId()) >= coupon.getIssueLimit()) {
 			// 사용자는 이미 "발급 성공"을 받았다. 이 기록이 원문의 미발급 건이다
 			failures.save(new IssueFailure(coupon.getId(), message.userId(), "2차 검증 실패: 수량 마감", received));
+			handled.handled();
 			return;
 		}
 		counts.increment(coupon.getId(), coupon.getEndsAt()); // INCR (GET과 별도 명령)
 		issues.save(new CouponIssue(coupon.getId(), message.userId(), Instant.now()));
+		handled.handled();
 	}
 
 }

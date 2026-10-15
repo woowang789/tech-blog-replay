@@ -45,8 +45,8 @@ services:
       DB_HOST: mysql
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      # 발급 워커가 동시에 처리하는 메시지 수. 아무것도 안 주면 4다
-      REPLAY_WORKERCONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      # 발급 워커가 동시에 처리하는 메시지 수. 아무것도 안 주면 8이다(1단계에서 4 → 8. 이 노트북에서 4개는 초당 500건도 못 따라간다)
+      REPLAY_WORKERCONCURRENCY: ${WORKER_CONCURRENCY:-8}
     ports:
       - "8080:8080" # API (쿠폰 발급 요청, 실험용 초기화·집계)
       - "8081:8081" # actuator (지표)
