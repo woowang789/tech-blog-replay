@@ -86,9 +86,10 @@ class ExperimentController {
 		Coupon coupon = catalog.get(couponId);
 		QueueInformation queue = amqp.getQueueInfo(queueName);
 		long issued = issues.countByCouponId(couponId);
-		return new Summary(couponId, coupon.getIssueLimit(), counts.get(couponId), responses.success(),
-				responses.soldOut(), issued, failures.countByCouponId(couponId), Math.max(0, issued - coupon.getIssueLimit()),
-				queue == null ? -1 : queue.getMessageCount(), queue == null ? -1 : queue.getConsumerCount(), gaps.snapshot());
+		return new Summary(couponId, coupon.getIssueLimit(), counts.get(couponId), counts.getRequests(couponId),
+				responses.success(), responses.soldOut(), issued, failures.countByCouponId(couponId),
+				Math.max(0, issued - coupon.getIssueLimit()), queue == null ? -1 : queue.getMessageCount(),
+				queue == null ? -1 : queue.getConsumerCount(), gaps.snapshot());
 	}
 
 	// 실험 중 0.1초마다 읽어도 가벼운 진행 상태(1단계 실행기가 쓴다). DB는 세지 않는다. 발급 누계는 Redis 수량으로 본다
@@ -127,10 +128,12 @@ class ExperimentController {
 			long secondCheckCount, Long incrResult) {
 	}
 
-	// successResponses: "발급 성공" 응답 수, issued: 실제 발급 수(DB), unissued: 워커 2차 검증 실패 수(= 미발급, DB),
-	// overIssued: 제한 수량을 넘겨 발급한 수, queued: 큐에 남아 아직 워커가 처리하지 않은 메시지 수(0이어야 집계가 끝난 것이다)
-	record Summary(String couponId, int issueLimit, long redisCount, long successResponses, long soldOutResponses,
-			long issued, long unissued, long overIssued, long queued, long consumers, GapStatistics.Snapshot gapMs) {
+	// redisCount: 수량 키(count), redisRequestCount: 요청 수량 키(countReq, 시도 3에서만 쓴다), successResponses: "발급 성공" 응답 수,
+	// issued: 실제 발급 수(DB), unissued: 워커 2차 검증 실패 수(= 미발급, DB), overIssued: 제한 수량을 넘겨 발급한 수,
+	// queued: 큐에 남아 아직 워커가 처리하지 않은 메시지 수(0이어야 집계가 끝난 것이다)
+	record Summary(String couponId, int issueLimit, long redisCount, long redisRequestCount, long successResponses,
+			long soldOutResponses, long issued, long unissued, long overIssued, long queued, long consumers,
+			GapStatistics.Snapshot gapMs) {
 	}
 
 }

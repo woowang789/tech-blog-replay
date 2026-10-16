@@ -13,14 +13,14 @@ import replay.fcfscoupon.coupon.CouponIssueRepository;
 import replay.fcfscoupon.coupon.IssueFailure;
 import replay.fcfscoupon.coupon.IssueFailureRepository;
 
-// 발급 워커. MQ에서 발급 요청을 받아 2차 검증을 하고 쿠폰을 최종 발급한다(DB 저장).
-// 원문의 "문제가 되는 코드 패턴" 그대로, 수량을 읽어(GET) 남았으면 올린다(INCR). 두 명령이 떨어져 있다
+// 발급 워커. MQ에서 발급 요청을 받아 최종 확인(IssueStrategy.verify)을 하고 쿠폰을 발급한다(DB 저장).
+// 원문의 기존 방식이면 여기서 GET으로 다시 읽고 INCR한다. 확인에서 떨어지면 미발급으로 기록한다
 @Component
 public class IssueWorker {
 
 	private final CouponCatalog coupons;
 
-	private final IssueCountStore counts;
+	private final IssueStrategy strategy;
 
 	private final CouponIssueRepository issues;
 
@@ -30,10 +30,10 @@ public class IssueWorker {
 
 	private final WorkerCounters handled;
 
-	public IssueWorker(CouponCatalog coupons, IssueCountStore counts, CouponIssueRepository issues,
+	public IssueWorker(CouponCatalog coupons, IssueStrategy strategy, CouponIssueRepository issues,
 			IssueFailureRepository failures, GapStatistics gaps, WorkerCounters handled) {
 		this.coupons = coupons;
-		this.counts = counts;
+		this.strategy = strategy;
 		this.issues = issues;
 		this.failures = failures;
 		this.gaps = gaps;
@@ -46,18 +46,16 @@ public class IssueWorker {
 		Instant received = Instant.now();
 		gaps.record(Duration.between(message.requestedAt(), received));
 		Coupon coupon = coupons.get(message.couponId());
-		// 2차 유효성 검사: 1차 검증 뒤 지금까지 다른 요청이 수량을 다 썼으면 발급하지 못한다 (GET)
-		long countSeen = counts.get(coupon.getId());
-		if (countSeen >= coupon.getIssueLimit()) {
+		IssueStrategy.Verdict verdict = strategy.verify(coupon, message);
+		if (!verdict.issue()) {
 			// 사용자는 이미 "발급 성공"을 받았다. 이 기록이 원문의 미발급 건이다
 			failures.save(new IssueFailure(coupon.getId(), message.userId(), message.requestedAt(), message.countSeen(),
-					received, countSeen, "2차 검증 실패: 수량 마감", Instant.now()));
+					received, verdict.countSeen(), "2차 검증 실패: 수량 마감", Instant.now()));
 			handled.handled();
 			return;
 		}
-		long incremented = counts.increment(coupon.getId(), coupon.getEndsAt()); // INCR (GET과 별도 명령)
 		issues.save(new CouponIssue(coupon.getId(), message.userId(), message.requestedAt(), message.countSeen(), received,
-				countSeen, incremented, Instant.now()));
+				verdict.countSeen(), verdict.incrResult(), Instant.now()));
 		handled.handled();
 	}
 

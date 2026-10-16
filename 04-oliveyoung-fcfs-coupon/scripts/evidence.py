@@ -110,6 +110,22 @@ def evidence(records, limit, run):
     return "\n".join(lines)
 
 
+def other_mode_records(records, mode):
+    # 원인별 증거는 원문 기존 방식에서만 가른다. 다른 방식(3단계)에서는 미발급 요청의 기록만 보여 준다.
+    # precharge·double-counter의 "순번"은 앞단이 선차감한 INCR 결과, countSeen은 그때 읽은 값(precharge: GET 값, double-counter: countReq INCR 결과)
+    unissued = sorted((r for r in records if r["result"] == "UNISSUED"), key=lambda r: r["firstCheckAt"])
+    lines = ["", f"미발급 요청의 기록 ({mode} 방식. 원인별 증거는 original 방식에서만 가른다)"]
+    if not unissued:
+        return "\n".join(lines + ["  없음"])
+    t0 = min(r["firstCheckAt"] for r in records)
+    lines.append("  사용자   1차 검증 시각   1차 때 읽은 값   선차감 순번(2차 때 값)")
+    for r in unissued[:20]:
+        lines.append(f"  {r['userId']:6,}   {(r['firstCheckAt'] - t0) / 1_000_000:+9.3f}초   {r['firstCheckCount']:12,}   {r['secondCheckCount']:12,}")
+    if len(unissued) > 20:
+        lines.append(f"  … 모두 {len(unissued):,}건")
+    return "\n".join(lines)
+
+
 def main(name, limit, rate, duration):
     os.chdir(Path(__file__).resolve().parent.parent)
     out_dir = Path("results") / f"evidence-{name}"
@@ -117,7 +133,10 @@ def main(name, limit, rate, duration):
     records = get_json(f"/experiments/records?couponId={COUPON}")
     if len(records) != run["summary"]["issued"] + run["summary"]["unissued"]:
         run["text"] += f"\n주의: 기록 {len(records):,}건이 발급 + 미발급 {run['summary']['issued'] + run['summary']['unissued']:,}건과 다르다"
-    text = run["text"] + "\n" + evidence(records, limit, run)
+    if run["settings"]["mode"] == "original":
+        text = run["text"] + "\n" + evidence(records, limit, run)
+    else:
+        text = run["text"] + "\n" + other_mode_records(records, run["settings"]["mode"])
     print(text)
     run["text"] = text
     save(out_dir, run)

@@ -41,3 +41,7 @@ replay:
   queue-name: coupon-issue
   # 발급 워커가 동시에 처리하는 메시지 수(리스너의 소비자 스레드 수). 운영에서는 워커가 여럿이라 1보다 크다
   worker-concurrency: 8
+  # 앞단과 워커가 수량을 다루는 방법(3단계). original: 원문의 기존 로직(앞단 GET, 워커 GET+INCR),
+  # precharge: 시도 1 선차감(앞단 GET+INCR), lua: 시도 2 Lua 스크립트(앞단 EVALSHA),
+  # double-counter: 시도 3 이중 카운터 + 선차감(앞단 INCR countReq → INCR count. 원문의 최종 선택)
+  issue-mode: original

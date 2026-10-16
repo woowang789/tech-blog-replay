@@ -56,7 +56,20 @@ def current_settings():
     if env.returncode != 0:
         sys.exit("앱 컨테이너의 설정을 읽지 못했다. docker compose ps로 app이 떠 있는지 확인한다")
     values = dict(line.split("=", 1) for line in env.stdout.splitlines() if "=" in line)
-    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "8"))}
+    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "8")), "mode": values.get("REPLAY_ISSUEMODE", "original")}
+
+
+# 수량을 다루는 방식(ISSUE_MODE)의 이름
+MODE_LABELS = {
+    "original": "원문 기존(앞단 GET, 워커 GET+INCR)",
+    "precharge": "시도 1 선차감(앞단 GET+INCR, 워커는 순번 확인)",
+    "lua": "시도 2 Lua 스크립트(앞단 EVALSHA 하나)",
+    "double-counter": "시도 3 이중 카운터 + 선차감(앞단 INCR countReq → INCR count)",
+}
+
+
+def describe_mode(settings):
+    return MODE_LABELS.get(settings["mode"], settings["mode"])
 
 
 def fmt_ms(ms):
@@ -189,7 +202,8 @@ def report(name, limit, rate, duration, settings, summary, responses, dropped, k
     last_response = max(r[0] for r in responses) - t0
     lines = [
         f"== {name} ({time.strftime('%H:%M:%S')})",
-        f"설정: 워커 소비자 {settings['worker']}개 / 제한 수량 {limit:,}개, 요청 초당 {rate:,}건 × {duration}초 = {requests:,}건 (사용자마다 1번)",
+        f"설정: {describe_mode(settings)} / 워커 소비자 {settings['worker']}개 / 제한 수량 {limit:,}개, "
+        f"요청 초당 {rate:,}건 × {duration}초 = {requests:,}건 (사용자마다 1번)",
         f"      본 실행 전에 예열로 초당 {WARMUP_RATE}건 × {WARMUP_SECONDS}초를 같은 경로로 흘리고 초기화했다",
     ]
     for w in checks(limit, requests, settings, summary, responses, dropped, k6_counts):
@@ -205,6 +219,8 @@ def report(name, limit, rate, duration, settings, summary, responses, dropped, k
         f"  미발급           {unissued:,}건  (제한 수량의 {unissued / limit * 100:.2f}%, 성공 응답의 "
         f"{(unissued / success * 100) if success else 0:.2f}%)   원문의 부하 테스트: 162건, 1.62%",
         f"  과발급           {summary['overIssued']:,}건",
+        f"  Redis 수량       count {summary['redisCount']:,}"
+        + (f", countReq {summary['redisRequestCount']:,}" if settings["mode"] == "double-counter" else ""),
         f"  Time Gap         최소 {fmt_ms(summary['gapMs']['minMs'])} / 평균 {fmt_ms(summary['gapMs']['avgMs'])} / 최대 {fmt_ms(summary['gapMs']['maxMs'])}",
         f"  마지막 응답 +{last_response:.1f}초, 워커가 다 처리한 시각 +{drained_at - t0:.1f}초 (0.5초 간격으로 확인)",
         "",
