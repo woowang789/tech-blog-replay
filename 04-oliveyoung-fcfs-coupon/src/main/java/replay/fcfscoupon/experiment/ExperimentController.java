@@ -2,6 +2,8 @@ package replay.fcfscoupon.experiment;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.QueueInformation;
@@ -14,15 +16,17 @@ import org.springframework.web.bind.annotation.RestController;
 
 import replay.fcfscoupon.coupon.Coupon;
 import replay.fcfscoupon.coupon.CouponCatalog;
+import replay.fcfscoupon.coupon.CouponIssue;
 import replay.fcfscoupon.coupon.CouponIssueRepository;
 import replay.fcfscoupon.coupon.CouponRepository;
+import replay.fcfscoupon.coupon.IssueFailure;
 import replay.fcfscoupon.coupon.IssueFailureRepository;
 import replay.fcfscoupon.issue.GapStatistics;
 import replay.fcfscoupon.issue.IssueCountStore;
 import replay.fcfscoupon.issue.ResponseCounters;
 import replay.fcfscoupon.issue.WorkerCounters;
 
-// 실험용: 실험 전에 모든 상태를 비우고 쿠폰을 하나 만들며(reset), 실험 뒤에 결과를 한눈에 모은다(summary)
+// 실험용: 실험 전에 모든 상태를 비우고 쿠폰을 하나 만들며(reset), 실험 뒤에 결과를 한눈에 모은다(summary, records)
 @RestController
 @RequestMapping("/experiments")
 class ExperimentController {
@@ -97,6 +101,30 @@ class ExperimentController {
 
 	// handled: 워커가 처리를 끝낸 수(발급 + 미발급). queued: 큐에서 기다리는 수(워커가 미리 가져간 메시지는 뺀 값)
 	record Progress(long successResponses, long soldOutResponses, long redisCount, long handled, long queued) {
+	}
+
+	// 2단계: 요청마다 남긴 기록(발급·미발급 모두). 1차 검증 시각과 그때 본 수량, 2차 검증 시각과 그때 본 수량, INCR 결과.
+	// 시각은 epoch 마이크로초다(앱 시계 기준)
+	@GetMapping("/records")
+	List<IssueRecord> records(@RequestParam(defaultValue = "C001") String couponId) {
+		List<IssueRecord> records = new ArrayList<>();
+		for (CouponIssue issue : issues.findByCouponId(couponId)) {
+			records.add(new IssueRecord(issue.getUserId(), "ISSUED", micros(issue.getFirstCheckAt()), issue.getFirstCheckCount(),
+					micros(issue.getSecondCheckAt()), issue.getSecondCheckCount(), issue.getIncrResult()));
+		}
+		for (IssueFailure failure : failures.findByCouponId(couponId)) {
+			records.add(new IssueRecord(failure.getUserId(), "UNISSUED", micros(failure.getFirstCheckAt()),
+					failure.getFirstCheckCount(), micros(failure.getSecondCheckAt()), failure.getSecondCheckCount(), null));
+		}
+		return records;
+	}
+
+	private static long micros(Instant instant) {
+		return instant.getEpochSecond() * 1_000_000 + instant.getNano() / 1_000;
+	}
+
+	record IssueRecord(long userId, String result, long firstCheckAt, long firstCheckCount, long secondCheckAt,
+			long secondCheckCount, Long incrResult) {
 	}
 
 	// successResponses: "발급 성공" 응답 수, issued: 실제 발급 수(DB), unissued: 워커 2차 검증 실패 수(= 미발급, DB),

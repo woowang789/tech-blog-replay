@@ -56,7 +56,7 @@ def current_settings():
     if env.returncode != 0:
         sys.exit("앱 컨테이너의 설정을 읽지 못했다. docker compose ps로 app이 떠 있는지 확인한다")
     values = dict(line.split("=", 1) for line in env.stdout.splitlines() if "=" in line)
-    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "4"))}
+    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "8"))}
 
 
 def fmt_ms(ms):
@@ -213,19 +213,21 @@ def report(name, limit, rate, duration, settings, summary, responses, dropped, k
     return "\n".join(lines)
 
 
-def main(name, limit, rate, duration):
-    os.chdir(Path(__file__).resolve().parent.parent)
-    wait_ready()
-    settings = current_settings()
-    out_dir = Path("results") / f"scenario-{name}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    warm_up(out_dir)
-
+def reset(limit):
     # 앞 실행(예열 포함)이 남긴 것을 모두 치우고, 비었는지 확인한다
     request(f"{BASE_URL}/experiments/reset?couponId={COUPON}&limit={limit}", method="POST")
     before = get_json(f"/experiments/summary?couponId={COUPON}")
     if any(before[k] for k in ("successResponses", "soldOutResponses", "issued", "unissued", "redisCount", "queued")):
         sys.exit(f"초기화 뒤에도 남은 것이 있다: {before}")
+
+
+def execute(name, limit, rate, duration, out_dir):
+    # 한 번 돌리고 리포트 본문과 원본 자료를 돌려준다. 2단계 실행기(evidence.py)도 이 흐름을 그대로 쓴다
+    wait_ready()
+    settings = current_settings()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    warm_up(out_dir)
+    reset(limit)
 
     probe = Probe()
     probe.start()
@@ -244,13 +246,25 @@ def main(name, limit, rate, duration):
         k6_counts[key] = k6_counts.get(key, 0) + 1
 
     text = report(name, limit, rate, duration, settings, summary, responses, dropped, k6_counts, probe.samples, t0, drained_at)
-    print(text)
-    (out_dir / "report.txt").write_text(text + "\n", encoding="utf-8")
-    (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"text": text, "settings": settings, "summary": summary, "responses": responses, "dropped": dropped,
+            "k6_counts": k6_counts, "samples": probe.samples, "t0": t0, "drained_at": drained_at}
+
+
+def save(out_dir, run):
+    (out_dir / "report.txt").write_text(run["text"] + "\n", encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps(run["summary"], ensure_ascii=False, indent=2), encoding="utf-8")
     with open(out_dir / "progress.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["time", "successResponses", "soldOutResponses", "redisCount", "handled", "queued"])
-        writer.writerows(probe.samples)
+        writer.writerows(run["samples"])
+
+
+def main(name, limit, rate, duration):
+    os.chdir(Path(__file__).resolve().parent.parent)
+    out_dir = Path("results") / f"scenario-{name}"
+    run = execute(name, limit, rate, duration, out_dir)
+    print(run["text"])
+    save(out_dir, run)
 
 
 if __name__ == "__main__":

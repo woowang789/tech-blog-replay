@@ -38,12 +38,13 @@ public class IssueService {
 		Coupon coupon = coupons.get(couponId);
 		IssueResult result;
 		// 1차 유효성 검사: 지금까지 발급된 수가 제한 수량에 닿았으면 마감 (GET)
-		if (counts.get(couponId) >= coupon.getIssueLimit()) {
+		long countSeen = counts.get(couponId);
+		if (countSeen >= coupon.getIssueLimit()) {
 			result = IssueResult.SOLD_OUT;
 		}
 		else {
-			// 통과하면 실제 발급은 워커에 맡기고(MQ 발행) 사용자에게는 성공으로 응답한다
-			rabbit.convertAndSend(queueName, new IssueMessage(couponId, userId, Instant.now()));
+			// 통과하면 실제 발급은 워커에 맡기고(MQ 발행) 사용자에게는 성공으로 응답한다. 그때 본 수량을 메시지에 함께 싣는다
+			rabbit.convertAndSend(queueName, new IssueMessage(couponId, userId, Instant.now(), countSeen));
 			result = IssueResult.SUCCESS;
 		}
 		responses.count(result);

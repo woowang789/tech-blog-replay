@@ -47,14 +47,17 @@ public class IssueWorker {
 		gaps.record(Duration.between(message.requestedAt(), received));
 		Coupon coupon = coupons.get(message.couponId());
 		// 2차 유효성 검사: 1차 검증 뒤 지금까지 다른 요청이 수량을 다 썼으면 발급하지 못한다 (GET)
-		if (counts.get(coupon.getId()) >= coupon.getIssueLimit()) {
+		long countSeen = counts.get(coupon.getId());
+		if (countSeen >= coupon.getIssueLimit()) {
 			// 사용자는 이미 "발급 성공"을 받았다. 이 기록이 원문의 미발급 건이다
-			failures.save(new IssueFailure(coupon.getId(), message.userId(), "2차 검증 실패: 수량 마감", received));
+			failures.save(new IssueFailure(coupon.getId(), message.userId(), message.requestedAt(), message.countSeen(),
+					received, countSeen, "2차 검증 실패: 수량 마감", Instant.now()));
 			handled.handled();
 			return;
 		}
-		counts.increment(coupon.getId(), coupon.getEndsAt()); // INCR (GET과 별도 명령)
-		issues.save(new CouponIssue(coupon.getId(), message.userId(), Instant.now()));
+		long incremented = counts.increment(coupon.getId(), coupon.getEndsAt()); // INCR (GET과 별도 명령)
+		issues.save(new CouponIssue(coupon.getId(), message.userId(), message.requestedAt(), message.countSeen(), received,
+				countSeen, incremented, Instant.now()));
 		handled.handled();
 	}
 
