@@ -12,7 +12,7 @@ public class OriginalStrategy implements IssueStrategy {
 	}
 
 	@Override
-	public Admission admit(Coupon coupon) {
+	public Admission admit(Coupon coupon, long userId) {
 		// 1차 유효성 검사: 지금까지 발급된 수가 제한 수량에 닿았으면 마감 (GET)
 		long seen = counts.get(coupon.getId());
 		return new Admission(seen < coupon.getIssueLimit(), seen, 0);
@@ -27,6 +27,11 @@ public class OriginalStrategy implements IssueStrategy {
 		}
 		long incremented = counts.increment(coupon.getId(), coupon.getEndsAt()); // INCR (GET과 별도 명령)
 		return new Verdict(true, seen, incremented);
+	}
+
+	@Override
+	public void rollback(Coupon coupon, IssueMessage message) {
+		counts.decrement(coupon.getId()); // 워커가 올린 수량을 되돌린다
 	}
 
 }

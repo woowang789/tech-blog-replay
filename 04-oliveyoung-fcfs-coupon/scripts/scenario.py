@@ -56,7 +56,32 @@ def current_settings():
     if env.returncode != 0:
         sys.exit("앱 컨테이너의 설정을 읽지 못했다. docker compose ps로 app이 떠 있는지 확인한다")
     values = dict(line.split("=", 1) for line in env.stdout.splitlines() if "=" in line)
-    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "8")), "mode": values.get("REPLAY_ISSUEMODE", "original")}
+    return {"worker": int(values.get("REPLAY_WORKERCONCURRENCY", "8")), "mode": values.get("REPLAY_ISSUEMODE", "original"),
+            "fault": values.get("REPLAY_FAULT", "none"), "fault_every": int(values.get("REPLAY_FAULTEVERY", "100")),
+            "on_db_failure": values.get("REPLAY_ONDBFAILURE", "retry"),
+            "idempotent": values.get("REPLAY_IDEMPOTENT", "false") == "true",
+            "compensate": values.get("REPLAY_COMPENSATE", "false") == "true"}
+
+
+# 4단계: 주입하는 실패의 이름
+FAULT_LABELS = {
+    "db-error": "워커의 DB 저장 실패",
+    "crash-before-ack": "워커가 저장 뒤 ack 전에 죽음",
+    "front-crash": "앞단이 countReq를 올린 뒤 count를 올리기 전에 죽음",
+}
+
+
+def describe_stage4(settings):
+    # 4단계 스위치가 하나라도 켜져 있으면 그 설명. 아니면 빈 문자열
+    parts = []
+    if settings["fault"] != "none":
+        parts.append(f"실패 주입: {FAULT_LABELS.get(settings['fault'], settings['fault'])} (사용자 {settings['fault_every']}명마다 1명, 첫 전달에서만)")
+        parts.append("DB 저장 실패 처리: " + ("롤백(원문)" if settings["on_db_failure"] == "rollback" else "재시도(메시지를 다시 받음)"))
+    if settings["idempotent"]:
+        parts.append("멱등 워커(유니크 제약) 켬")
+    if settings["compensate"]:
+        parts.append("보상(countReq 되돌림) 켬")
+    return " / ".join(parts)
 
 
 # 수량을 다루는 방식(ISSUE_MODE)의 이름
@@ -135,7 +160,8 @@ def wait_drained():
     deadline = time.time() + DRAIN_TIMEOUT_SECONDS
     while time.time() < deadline:
         s = get_json(f"/experiments/summary?couponId={COUPON}")
-        if s["queued"] == 0 and s["successResponses"] == s["issued"] + s["unissued"]:
+        # 발급 기록이 있는 사용자 + 미발급 기록 = 성공 응답이면 모두 처리된 것이다(중복 저장이 있어도 사용자 수로 센다)
+        if s["queued"] == 0 and s["successResponses"] == s["issuedUsers"] + s["unissued"]:
             return s, time.time()
         time.sleep(0.5)
     return get_json(f"/experiments/summary?couponId={COUPON}"), time.time()
@@ -147,8 +173,10 @@ def checks(limit, requests, settings, summary, responses, dropped, k6_counts):
         warnings.append(f"쿠폰의 제한 수량이 {summary['issueLimit']:,}개로 요청한 {limit:,}개와 다르다")
     if dropped:
         warnings.append(f"k6가 요청 {dropped:,}건을 제때 보내지 못했다(VU 부족). 초당 요청 수를 줄이거나 maxVUs를 늘린다")
-    if k6_counts.get("other", 0):
-        warnings.append(f"200·409가 아닌 응답이 {k6_counts['other']:,}건 있다. k6-summary.txt와 앱 로그를 본다")
+    # 4단계 front-crash는 주입한 실패마다 500이 나가는 것이 맞다. 그만큼이면 주의가 아니다
+    expected_errors = summary["faults"]["injected"] if settings["fault"] == "front-crash" else 0
+    if k6_counts.get("other", 0) != expected_errors:
+        warnings.append(f"200·409가 아닌 응답이 {k6_counts.get('other', 0):,}건 있다. k6-summary.txt와 앱 로그를 본다")
     if abs(len(responses) + dropped - requests) > 1:  # k6가 마지막 칸에서 1건을 더 보낼 때가 있다
         warnings.append(f"응답이 {len(responses):,}건으로 요청 {requests:,}건과 다르다")
     if k6_counts.get("200", 0) != summary["successResponses"] or k6_counts.get("409", 0) != summary["soldOutResponses"]:
@@ -156,10 +184,10 @@ def checks(limit, requests, settings, summary, responses, dropped, k6_counts):
                         f"(성공 {summary['successResponses']:,}, 마감 {summary['soldOutResponses']:,})이 다르다. 다른 요청이 섞였다")
     if summary["queued"] != 0:
         warnings.append(f"큐에 메시지 {summary['queued']:,}건이 남았다. 워커가 {DRAIN_TIMEOUT_SECONDS}초 안에 다 처리하지 못했다")
-    if summary["successResponses"] != summary["issued"] + summary["unissued"]:
-        warnings.append("성공 응답 수가 발급 + 미발급과 다르다. 워커가 아직 처리 중이거나 메시지가 사라졌다")
-    if summary["redisCount"] != summary["issued"]:
-        warnings.append(f"Redis 수량({summary['redisCount']:,})과 DB 발급 수({summary['issued']:,})가 다르다")
+    if summary["successResponses"] != summary["issuedUsers"] + summary["unissued"]:
+        warnings.append("성공 응답 수가 발급 사용자 + 미발급과 다르다. 워커가 아직 처리 중이거나 메시지가 사라졌다")
+    if summary["redisCount"] != summary["issuedUsers"]:
+        warnings.append(f"Redis 수량({summary['redisCount']:,})과 발급 사용자 수({summary['issuedUsers']:,})가 다르다")
     return warnings
 
 
@@ -206,11 +234,14 @@ def report(name, limit, rate, duration, settings, summary, responses, dropped, k
         f"요청 초당 {rate:,}건 × {duration}초 = {requests:,}건 (사용자마다 1번)",
         f"      본 실행 전에 예열로 초당 {WARMUP_RATE}건 × {WARMUP_SECONDS}초를 같은 경로로 흘리고 초기화했다",
     ]
+    if describe_stage4(settings):
+        lines.append(f"      4단계: {describe_stage4(settings)}")
     for w in checks(limit, requests, settings, summary, responses, dropped, k6_counts):
         lines.append(f"주의: {w}")
     lines += [
         f"요청: 응답 {len(responses):,}건 (200 발급 성공 {k6_counts.get('200', 0):,}건, 409 마감 {k6_counts.get('409', 0):,}건, "
-        f"그 밖 {k6_counts.get('other', 0):,}건). 응답 시간 중앙값 {fmt_ms(percentile(durations, 50))}, "
+        f"그 밖 {k6_counts.get('other', 0):,}건{' = 주입한 실패의 500' if settings['fault'] == 'front-crash' and k6_counts.get('other', 0) else ''}). "
+        f"응답 시간 중앙값 {fmt_ms(percentile(durations, 50))}, "
         f"p99 {fmt_ms(percentile(durations, 99))}, 최대 {fmt_ms(max(durations))}",
         "",
         "결과 (워커가 큐를 다 비운 뒤)",
@@ -219,9 +250,18 @@ def report(name, limit, rate, duration, settings, summary, responses, dropped, k
         f"  미발급           {unissued:,}건  (제한 수량의 {unissued / limit * 100:.2f}%, 성공 응답의 "
         f"{(unissued / success * 100) if success else 0:.2f}%)   원문의 부하 테스트: 162건, 1.62%",
         f"  과발급           {summary['overIssued']:,}건",
+        f"  약속 어김        {summary['brokenPromises']:,}건 (성공 응답을 받았지만 발급 기록이 없는 사용자)",
+        f"  중복 발급        {summary['duplicateIssues']:,}건 (같은 사용자에게 두 번 이상 저장)",
         f"  Redis 수량       count {summary['redisCount']:,}"
-        + (f", countReq {summary['redisRequestCount']:,}" if settings["mode"] == "double-counter" else ""),
+        + (f", countReq {summary['redisRequestCount']:,} (차이 {summary['redisRequestCount'] - summary['redisCount']:,})"
+           if settings["mode"] == "double-counter" else ""),
         f"  Time Gap         최소 {fmt_ms(summary['gapMs']['minMs'])} / 평균 {fmt_ms(summary['gapMs']['avgMs'])} / 최대 {fmt_ms(summary['gapMs']['maxMs'])}",
+    ]
+    f = summary["faults"]
+    if settings["fault"] != "none" or f["redelivered"] or f["rolledBack"] or f["duplicatePrevented"]:
+        lines.append(f"  실패 주입 {f['injected']:,}건 / 다시 전달된 메시지 {f['redelivered']:,}건 / 원문 방식 롤백 {f['rolledBack']:,}건 / "
+                     f"유니크 제약이 막은 중복 {f['duplicatePrevented']:,}건")
+    lines += [
         f"  마지막 응답 +{last_response:.1f}초, 워커가 다 처리한 시각 +{drained_at - t0:.1f}초 (0.5초 간격으로 확인)",
         "",
     ]

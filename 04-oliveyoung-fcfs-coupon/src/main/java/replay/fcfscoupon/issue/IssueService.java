@@ -35,7 +35,7 @@ public class IssueService {
 
 	public IssueResult request(String couponId, long userId) {
 		Coupon coupon = coupons.get(couponId);
-		IssueStrategy.Admission admission = strategy.admit(coupon);
+		IssueStrategy.Admission admission = strategy.admit(coupon, userId);
 		IssueResult result;
 		if (!admission.admitted()) {
 			result = IssueResult.SOLD_OUT;

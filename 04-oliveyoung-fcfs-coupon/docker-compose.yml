@@ -49,6 +49,13 @@ services:
       REPLAY_WORKERCONCURRENCY: ${WORKER_CONCURRENCY:-8}
       # 3단계 스위치: 수량을 다루는 방법. original(원문 기존), precharge(시도 1), lua(시도 2), double-counter(시도 3 + 1, 원문의 최종 선택)
       REPLAY_ISSUEMODE: ${ISSUE_MODE:-original}
+      # 4단계 스위치: 실패 주입(none, db-error, crash-before-ack, front-crash)과 몇 명마다 걸지, DB 실패 처리(retry, rollback),
+      # 멱등 워커(유니크 제약), 보상(countReq 되돌림). 아무것도 안 주면 0~3단계와 같다
+      REPLAY_FAULT: ${FAULT:-none}
+      REPLAY_FAULTEVERY: ${FAULT_EVERY:-100}
+      REPLAY_ONDBFAILURE: ${ON_DB_FAILURE:-retry}
+      REPLAY_IDEMPOTENT: ${IDEMPOTENT:-false}
+      REPLAY_COMPENSATE: ${COMPENSATE:-false}
     ports:
       - "8080:8080" # API (쿠폰 발급 요청, 실험용 초기화·집계)
       - "8081:8081" # actuator (지표)

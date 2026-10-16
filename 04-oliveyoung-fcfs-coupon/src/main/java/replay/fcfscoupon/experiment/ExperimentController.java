@@ -47,13 +47,15 @@ class ExperimentController {
 
 	private final WorkerCounters handled;
 
+	private final FaultInjector faults;
+
 	private final AmqpAdmin amqp;
 
 	private final String queueName;
 
 	ExperimentController(CouponRepository coupons, CouponCatalog catalog, CouponIssueRepository issues,
 			IssueFailureRepository failures, IssueCountStore counts, ResponseCounters responses, GapStatistics gaps,
-			WorkerCounters handled, AmqpAdmin amqp, @Value("${replay.queue-name}") String queueName) {
+			WorkerCounters handled, FaultInjector faults, AmqpAdmin amqp, @Value("${replay.queue-name}") String queueName) {
 		this.coupons = coupons;
 		this.catalog = catalog;
 		this.issues = issues;
@@ -62,6 +64,7 @@ class ExperimentController {
 		this.responses = responses;
 		this.gaps = gaps;
 		this.handled = handled;
+		this.faults = faults;
 		this.amqp = amqp;
 		this.queueName = queueName;
 	}
@@ -76,6 +79,7 @@ class ExperimentController {
 		responses.reset();
 		gaps.reset();
 		handled.reset();
+		faults.reset();
 		Coupon coupon = coupons.save(new Coupon(couponId, limit, Instant.now().plus(Duration.ofDays(1))));
 		catalog.refresh(coupon);
 		return coupon;
@@ -86,10 +90,30 @@ class ExperimentController {
 		Coupon coupon = catalog.get(couponId);
 		QueueInformation queue = amqp.getQueueInfo(queueName);
 		long issued = issues.countByCouponId(couponId);
+		long distinctUsers = issues.countDistinctUsers(couponId);
 		return new Summary(couponId, coupon.getIssueLimit(), counts.get(couponId), counts.getRequests(couponId),
-				responses.success(), responses.soldOut(), issued, failures.countByCouponId(couponId),
-				Math.max(0, issued - coupon.getIssueLimit()), queue == null ? -1 : queue.getMessageCount(),
-				queue == null ? -1 : queue.getConsumerCount(), gaps.snapshot());
+				responses.success(), responses.soldOut(), issued, distinctUsers, issued - distinctUsers,
+				failures.countByCouponId(couponId), Math.max(0, distinctUsers - coupon.getIssueLimit()),
+				responses.success() - distinctUsers, queue == null ? -1 : queue.getMessageCount(),
+				queue == null ? -1 : queue.getConsumerCount(), gaps.snapshot(),
+				new Faults(faults.fault().name(), faults.injectedCount(), handled.redeliveredCount(), handled.rolledBackCount(),
+						handled.duplicatePreventedCount()));
+	}
+
+	// 4단계 정합성 보정: 큐가 비어 처리 중인 요청이 없을 때, 어긋난 countReq를 count에 맞춘다. 앞뒤 값을 돌려준다
+	@PostMapping("/reconcile")
+	Reconcile reconcile(@RequestParam(defaultValue = "C001") String couponId) {
+		QueueInformation queue = amqp.getQueueInfo(queueName);
+		long count = counts.get(couponId);
+		long before = counts.getRequests(couponId);
+		boolean applied = queue != null && queue.getMessageCount() == 0 && before != count;
+		if (applied) {
+			counts.setRequests(couponId, count);
+		}
+		return new Reconcile(count, before, counts.getRequests(couponId), applied);
+	}
+
+	record Reconcile(long count, long countReqBefore, long countReqAfter, boolean applied) {
 	}
 
 	// 실험 중 0.1초마다 읽어도 가벼운 진행 상태(1단계 실행기가 쓴다). DB는 세지 않는다. 발급 누계는 Redis 수량으로 본다
@@ -129,11 +153,16 @@ class ExperimentController {
 	}
 
 	// redisCount: 수량 키(count), redisRequestCount: 요청 수량 키(countReq, 시도 3에서만 쓴다), successResponses: "발급 성공" 응답 수,
-	// issued: 실제 발급 수(DB), unissued: 워커 2차 검증 실패 수(= 미발급, DB), overIssued: 제한 수량을 넘겨 발급한 수,
-	// queued: 큐에 남아 아직 워커가 처리하지 않은 메시지 수(0이어야 집계가 끝난 것이다)
+	// issued: 발급 기록 행 수(DB), issuedUsers: 발급 기록이 있는 사용자 수, duplicateIssues: 같은 사용자에게 두 번 이상 저장된 수(4단계),
+	// unissued: 워커가 미발급으로 기록한 수(2차 검증 실패, 롤백), overIssued: 제한 수량을 넘겨 발급한 사용자 수,
+	// brokenPromises: 성공 응답을 받았지만 발급 기록이 없는 사용자 수(= 약속을 어긴 수), queued: 큐에 남은 메시지 수(0이어야 집계가 끝난 것이다),
+	// faults: 주입한 실패 수, 다시 전달된 메시지 수, 원문 방식으로 롤백한 수, 유니크 제약이 막은 중복 수
 	record Summary(String couponId, int issueLimit, long redisCount, long redisRequestCount, long successResponses,
-			long soldOutResponses, long issued, long unissued, long overIssued, long queued, long consumers,
-			GapStatistics.Snapshot gapMs) {
+			long soldOutResponses, long issued, long issuedUsers, long duplicateIssues, long unissued, long overIssued,
+			long brokenPromises, long queued, long consumers, GapStatistics.Snapshot gapMs, Faults faults) {
+	}
+
+	record Faults(String fault, long injected, long redelivered, long rolledBack, long duplicatePrevented) {
 	}
 
 }

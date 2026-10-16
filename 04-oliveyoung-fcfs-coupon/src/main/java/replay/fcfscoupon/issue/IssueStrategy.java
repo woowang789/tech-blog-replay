@@ -7,10 +7,13 @@ import replay.fcfscoupon.coupon.Coupon;
 public interface IssueStrategy {
 
 	// 앞단: 요청을 받아들일지 정한다. countSeen은 그때 읽은 수량(읽지 않는 방식이면 -1), position은 선차감한 순번(선차감하지 않으면 0)
-	Admission admit(Coupon coupon);
+	Admission admit(Coupon coupon, long userId);
 
 	// 워커: 발급해도 되는지 최종 확인한다. countSeen은 그때 본 수량, incrResult는 INCR이 돌려준 값(INCR하지 않으면 -1)
 	Verdict verify(Coupon coupon, IssueMessage message);
+
+	// 워커: 발급을 확정했다가 DB 저장이 실패했을 때 수량을 되돌린다(원문의 "DB 처리 실패 시 롤백". 4단계)
+	void rollback(Coupon coupon, IssueMessage message);
 
 	record Admission(boolean admitted, long countSeen, long position) {
 	}

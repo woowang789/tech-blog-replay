@@ -15,7 +15,7 @@ public class PrechargeStrategy implements IssueStrategy {
 	}
 
 	@Override
-	public Admission admit(Coupon coupon) {
+	public Admission admit(Coupon coupon, long userId) {
 		long seen = counts.get(coupon.getId()); // GET
 		if (seen >= coupon.getIssueLimit()) {
 			return new Admission(false, seen, 0);
@@ -31,6 +31,11 @@ public class PrechargeStrategy implements IssueStrategy {
 			return new Verdict(false, message.position(), -1);
 		}
 		return new Verdict(true, message.position(), message.position());
+	}
+
+	@Override
+	public void rollback(Coupon coupon, IssueMessage message) {
+		counts.decrement(coupon.getId()); // 앞단이 선차감한 수량을 되돌린다
 	}
 
 }

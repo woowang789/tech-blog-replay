@@ -75,6 +75,11 @@ public class IssueCountStore {
 		return redis.opsForValue().decrement(requestKey(couponId));
 	}
 
+	// 4단계 정합성 보정: 어긋난 countReq를 count에 맞춘다(큐가 비어 처리 중인 요청이 없을 때만 뜻이 있다)
+	public void setRequests(String couponId, long value) {
+		redis.opsForValue().set(requestKey(couponId), String.valueOf(value), java.time.Duration.ofDays(1));
+	}
+
 	public void delete(String couponId) {
 		redis.delete(List.of(key(couponId), requestKey(couponId)));
 	}

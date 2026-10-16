@@ -14,7 +14,7 @@ public class LuaStrategy implements IssueStrategy {
 	}
 
 	@Override
-	public Admission admit(Coupon coupon) {
+	public Admission admit(Coupon coupon, long userId) {
 		boolean admitted = counts.admitAtomically(coupon.getId(), coupon.getIssueLimit(), coupon.getEndsAt());
 		return new Admission(admitted, -1, 0);
 	}
@@ -22,6 +22,11 @@ public class LuaStrategy implements IssueStrategy {
 	@Override
 	public Verdict verify(Coupon coupon, IssueMessage message) {
 		return new Verdict(true, -1, -1);
+	}
+
+	@Override
+	public void rollback(Coupon coupon, IssueMessage message) {
+		counts.decrement(coupon.getId()); // 스크립트가 올린 수량을 되돌린다
 	}
 
 }

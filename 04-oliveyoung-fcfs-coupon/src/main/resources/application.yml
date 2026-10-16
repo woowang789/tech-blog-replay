@@ -45,3 +45,14 @@ replay:
   # precharge: 시도 1 선차감(앞단 GET+INCR), lua: 시도 2 Lua 스크립트(앞단 EVALSHA),
   # double-counter: 시도 3 이중 카운터 + 선차감(앞단 INCR countReq → INCR count. 원문의 최종 선택)
   issue-mode: original
+  # 4단계 스위치. 모두 기본값이면 0~3단계와 같다
+  # fault: 성공 응답 뒤의 실패를 일으킨다. none, db-error(워커 DB 저장 실패), crash-before-ack(저장 뒤 ack 전 종료), front-crash(countReq 뒤 count 전 종료)
+  fault: none
+  # fault-every: 사용자 번호가 이 수의 배수인 요청에만 실패를 건다
+  fault-every: 100
+  # on-db-failure: 워커의 DB 저장이 실패했을 때. rollback(원문: 수량을 되돌리고 포기) 또는 retry(예외를 던져 메시지를 다시 받는다)
+  on-db-failure: retry
+  # idempotent: true면 발급 내역에 (coupon_id, user_id) 유니크 제약을 걸어 같은 사용자의 두 번째 저장을 막는다
+  idempotent: false
+  # compensate: true면 이중 카운터에서 countReq를 올린 뒤 count를 올리기 전에 예외가 나면 countReq를 되돌린다
+  compensate: false
